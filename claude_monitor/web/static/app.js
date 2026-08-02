@@ -1238,12 +1238,101 @@ views.session = async (params, sid) => {
   }
 };
 
+/** Top level of the Agents section: one card per project. Clicking drills
+    into that project's sessions → workflows → agents. */
+async function agentsProjectsView(params) {
+  const d = await api('/api/agents', { limit: 1500 });
+  const projs = new Map();
+  for (const a of d.agents) {
+    const key = a.project || '(unknown)';
+    if (!projs.has(key)) {
+      projs.set(key, { name: key, agents: 0, running: 0, cost: 0,
+                       sessions: new Set(), latest: 0 });
+    }
+    const p = projs.get(key);
+    p.agents++;
+    p.cost += a.cost;
+    if (a.state === 'running') p.running++;
+    p.sessions.add(a.session_id);
+    p.latest = Math.max(p.latest, a.started ? Date.parse(a.started) : 0);
+  }
+  const rows = [...projs.values()];
+  rows.sort((a, b) => (b.running - a.running) || (b.cost - a.cost));
+
+  $('#view').innerHTML = `
+    <div class="hd">
+      <div><h1>Agents</h1><p class="sub">${d.total} subagent runs across ${
+        rows.length} project${rows.length === 1 ? '' : 's'} in the last ${
+        winLabel()} · pick a project to explore</p></div>
+      <div class="right">
+        <input type="search" id="q" placeholder="Search agent topics…"
+               aria-label="Search agents" value="">
+        ${windowPicker()}
+      </div>
+    </div>
+
+    <section class="grid cols2">
+      <div class="card"><div class="ch"><h2>Cost per run</h2>
+        <span class="meta">log-spaced bins · all projects</span></div>
+        <div class="cb"><div id="dist"></div>
+        <dl class="kv" style="margin-top:12px">
+          ${Object.entries(d.percentiles).map(([p, v]) =>
+            `<dt>p${p}</dt><dd>${usd(v)}</dd>`).join('')}
+        </dl></div></div>
+      <div class="card"><div class="ch"><h2>By type</h2></div>
+        <div class="cb">${barList(d.by_type.map((b, i) => ({
+          label: b.key, value: b.cost, color: SERIES[i % SERIES.length],
+          text: usd(b.cost), sub: `${b.agents}`,
+          href: `#/agents?type=${encodeURIComponent(b.key)}`,
+          tip: `${b.agents} runs · ${tok(b.tokens)} tokens\n${
+            b.api_calls.toLocaleString()} calls`,
+        })))}</div></div>
+    </section>
+
+    <div class="gitgrid">${rows.map(p => `
+      <a class="card projcard" href="#/agents?project=${encodeURIComponent(p.name)}">
+        <div class="pc-head">${avatar(p.name)}<b>${esc(p.name)}</b>
+          ${p.running ? `<span class="st live"><i></i>${p.running} running</span>` : ''}
+        </div>
+        <div class="pc-stats">
+          <span><b class="num">${p.agents}</b> agent${p.agents === 1 ? '' : 's'}</span>
+          <span><b class="num">${p.sessions.size}</b> session${
+            p.sessions.size === 1 ? '' : 's'}</span>
+          <span class="num cost">${usd(p.cost)}</span>
+        </div>
+        <div class="pc-foot">last agent ${p.latest
+          ? ago(new Date(p.latest).toISOString()) : '—'} · explore →</div>
+      </a>`).join('') ||
+      '<div class="empty"><b>No agent runs in this window</b>Widen the time window to see older work.</div>'}
+    </div>`;
+
+  hydrateTips($('#view'));
+  wireWindow($('#view'));
+  colChart($('#dist'), d.distribution.map(b => ({
+    v: b.count, label: usd(b.lo),
+    tip: `${usd(b.lo)} – ${usd(b.hi)}\n${b.count} agents`,
+  })), { height: 138, fmt: v => Math.round(v) });
+  const qi = $('#q');
+  qi.addEventListener('input', debounce(() => {
+    if (!qi.value) return;
+    history.replaceState(null, '',
+      `#/agents?q=${encodeURIComponent(qi.value)}`);
+    route();
+  }, 260));
+}
+
 views.agents = async (params) => {
   const q = params.get('q') || '', type = params.get('type') || '';
+  const project = params.get('project') || '';
   const sort = params.get('sort') || 'cost';
+  // Two levels: a project grid at #/agents, and a drill-down (sessions →
+  // workflows → agents) once a project is picked — or immediately when
+  // searching or filtering by type, since those cut across projects.
+  if (!project && !q && !type) return agentsProjectsView(params);
+
   const [d, sess] = await Promise.all([
-    api('/api/agents', { q, type, sort, limit: 1500 }),
-    api('/api/sessions', { limit: 2000 }),
+    api('/api/agents', { q, type, sort, project, limit: 1500 }),
+    api('/api/sessions', { project, limit: 2000 }),
   ]);
   const smeta = {};
   for (const s of sess.sessions) smeta[s.id] = s;
@@ -1319,12 +1408,16 @@ views.agents = async (params) => {
   };
 
   $('#view').innerHTML = `
+    ${project ? `<div class="crumb"><a href="#/agents">Agents</a> / ${
+      esc(project)}</div>` : ''}
     <div class="hd">
-      <div><h1>Agents</h1><p class="sub">${d.total} subagent runs across ${
+      <div><h1>Agents${project ? ` — ${esc(project)}` : ''}</h1>
+        <p class="sub">${d.total} subagent runs across ${
         groups.length} session${groups.length === 1 ? '' : 's'} in the last ${
         winLabel()}</p></div>
       <div class="right">
-        ${type ? `<a class="btn" href="#/agents">Clear ✕</a>` : ''}
+        ${project || type || q
+          ? `<a class="btn" href="#/agents">All projects ✕</a>` : ''}
         <input type="search" id="q" placeholder="Search agent topics…"
                aria-label="Search agents" value="${esc(q)}">
         <div class="pills" id="sortSeg" role="group" aria-label="Sort agents">
@@ -1347,7 +1440,7 @@ views.agents = async (params) => {
         <div class="cb">${barList(d.by_type.map((b, i) => ({
           label: b.key, value: b.cost, color: SERIES[i % SERIES.length],
           text: usd(b.cost), sub: `${b.agents}`,
-          href: `#/agents?type=${encodeURIComponent(b.key)}`,
+          href: `#/agents?${project ? `project=${encodeURIComponent(project)}&` : ''}type=${encodeURIComponent(b.key)}`,
           tip: `${b.agents} runs · ${tok(b.tokens)} tokens\n${
             b.api_calls.toLocaleString()} calls`,
         })))}</div></div>
