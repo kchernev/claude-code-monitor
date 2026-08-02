@@ -1690,8 +1690,6 @@ function concChart(host, agents, t0, t1) {
   svg('path', { d: `${d}L${X(t1)},${Y(0)}L${X(t0)},${Y(0)}Z`,
                 fill: 'color-mix(in srgb,var(--vio) 14%,transparent)' }, s);
   svg('path', { class: 'ln', d, stroke: 'var(--vio)', 'stroke-width': 1.6 }, s);
-  const t = svg('text', { class: 'axis-t', x: 2, y: 12 }, s);
-  t.textContent = `parallelism · peak ×${peak}`;
 }
 
 function wfInspectorHTML(a, d) {
@@ -1816,7 +1814,11 @@ views.workflow = async (params, sid, wfid) => {
           <div class="right">${legend([['done', 'var(--vio)'],
             ['running', 'var(--gold)'], ['stopped', 'var(--line2)']])}</div></div>
         <div class="cb">
-          <div id="wfconc"></div>
+          <div class="wfg-row concrow">
+            <span class="lbl">parallelism · peak ×${d.peak_parallelism}</span>
+            <div class="conchost" id="wfconc"></div>
+            <span class="cst"></span>
+          </div>
           <div id="wfg">${wfGanttHTML(agents, t0, t1, sel)}</div>
         </div>
       </div>

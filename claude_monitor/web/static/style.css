@@ -533,7 +533,11 @@ footer.pagefoot{display:flex;justify-content:space-between;color:var(--ink3);
   font-family:var(--mono);font-size:9.5px;color:var(--ink3);white-space:nowrap}
 .wfg-row.axis .trk span:first-child{transform:none}
 .wfg-row.axis .trk span:last-child{transform:translateX(-100%)}
-.wfg-row:not(.axis):hover{background:var(--panel2)}
+.wfg-row:not(.axis):not(.concrow):hover{background:var(--panel2)}
+.wfg-row.concrow{cursor:default;align-items:end;margin-bottom:2px}
+.wfg-row.concrow .lbl{font-family:var(--mono);font-size:9.5px;color:var(--ink3)}
+.wfg-row.concrow .conchost{height:74px}
+.wfg-row.concrow .conchost svg{display:block}
 .wfg-row.sel{background:color-mix(in srgb,var(--vio) 9%,var(--card));
              outline:1px solid color-mix(in srgb,var(--vio) 35%,transparent)}
 .wfg-row .lbl{display:flex;align-items:center;gap:7px;font-size:11.5px;
