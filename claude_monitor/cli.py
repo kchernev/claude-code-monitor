@@ -778,7 +778,17 @@ def cmd_web(console: Console, args) -> int:
         )
         return 1
 
-    app = create_app(claude_dir=args.claude_dir)
+    # There is no authentication: anyone who can reach the port can read every
+    # prompt, path and project name in the corpus. Loopback keeps that to this
+    # machine; anything else is a decision the user should make knowingly.
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        console.print(
+            f"[{C_ERR}]⚠ Serving on {args.host} — the UI has no authentication.[/]\n"
+            f"[{C_DIM}]  Everyone who can reach this port can read your prompts, "
+            f"file paths and project names.[/]"
+        )
+
+    app = create_app(claude_dir=args.claude_dir, allow_network=not args.no_network)
     store = app.config["STORE"]
 
     paths = store.corpus.session_paths()
@@ -812,6 +822,11 @@ def cmd_web(console: Console, args) -> int:
         app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
     except KeyboardInterrupt:
         pass
+    finally:
+        # Persist whatever the throttled background saves have not written yet,
+        # so the next start doesn't re-parse work already done.
+        store.stop()
+        store.corpus.save_cache()
     return 0
 
 
@@ -984,6 +999,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--host", default="127.0.0.1")
     sp.add_argument("--port", type=int, default=8787)
     sp.add_argument("--open", action="store_true", help="open a browser window")
+    sp.add_argument("--no-network", action="store_true",
+                    help="never call Anthropic for live plan limits; use only "
+                         "Claude Code's cached copy")
     sp.set_defaults(func=cmd_web)
 
     sp = common(sub.add_parser("workflows", help="workflow fan-outs and parallelism"))

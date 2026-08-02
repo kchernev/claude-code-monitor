@@ -214,8 +214,10 @@ class WorkflowRun:
         topics = [a.topic for a in self.agents if a.topic]
         if not topics:
             return self.workflow_id
-        # The longest common opening across topics usually names the workflow.
-        return max(set(topics), key=topics.count)
+        # Most common topic names the fan-out. Sorted first so a tie always
+        # breaks the same way — iterating a set would let the title change
+        # between runs, since string hashing is salted per process.
+        return max(sorted(set(topics)), key=topics.count)
 
 
 def all_workflows(sessions: Iterable[Session]) -> List[WorkflowRun]:
@@ -368,6 +370,40 @@ def token_economics(sessions: Iterable[Session]) -> dict:
         "list_output_rate": list_rate,
         "multiple_of_list": (effective / list_rate) if list_rate else 0.0,
     }
+
+
+def recent_rates(
+    sessions: Iterable[Session], window_s: float = 900.0
+) -> Tuple[float, float]:
+    """``(USD/hour, output tokens/sec)`` over the trailing window ending *now*.
+
+    Anchoring at wall-clock now is the whole point: a lifetime average — or a
+    window anchored at a session's own last write — keeps reporting an hours-old
+    burst as if it were happening this minute. Main-thread calls are exact,
+    since the timeline is per call; agent totals are apportioned by how much of
+    their runtime falls inside the window.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    lo = now - window_s
+    cost = out = 0.0
+    for s in sessions:
+        for ts, o, _ctx, c in reversed(s.timeline):
+            if ts < lo:
+                break
+            cost += c
+            out += o
+        for a in s.agents:
+            if not a.started:
+                continue
+            t0 = a.started.timestamp()
+            t1 = a.ended.timestamp() if a.ended else now
+            overlap = min(now, t1) - max(lo, t0)
+            if overlap <= 0:
+                continue
+            frac = overlap / max(1.0, t1 - t0)
+            cost += a.cost * frac
+            out += a.usage.output_tokens * frac
+    return cost / window_s * 3600.0, out / window_s
 
 
 def velocity_series(sess: Session, bucket_s: float = 30.0) -> List[Tuple[float, float]]:

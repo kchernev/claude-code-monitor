@@ -128,11 +128,9 @@ class Dashboard:
         wt = analytics.totals(window)
         sysinfo = system_snapshot()
 
-        burn = sum(
-            s.total_cost / s.duration_s * 3600.0
-            for s in live
-            if s.duration_s > 0
-        )
+        # Trailing-window rate, not a lifetime average: what these sessions are
+        # costing right now, which is the same number the web UI reports.
+        burn, _ = analytics.recent_rates(live, 900.0)
         live_tps = sum(self.live_tps(s) for s in live)
 
         grid = Table.grid(expand=True, padding=(0, 2))
@@ -426,4 +424,7 @@ def run(
                 live.update(dash.render())
         except KeyboardInterrupt:
             pass
+    # Refreshes only save the index periodically; flush on the way out so the
+    # parsing done during this run isn't thrown away.
+    corpus.save_cache()
     console.print(f"[{C_DIM}]Claude Code Monitor stopped.[/]")

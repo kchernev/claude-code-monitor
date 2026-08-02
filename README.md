@@ -14,8 +14,11 @@ Claude Code already writes to `~/.claude/projects/`.
 
 </div>
 
-Nothing is sent anywhere. It reads local files and `/proc` — that's the whole
-attack surface.
+Your transcripts never leave the machine — everything is computed from local
+files and `/proc`. The one outbound request is to Anthropic's usage endpoint,
+for the plan-limit card in the web UI, authorized by the OAuth token Claude
+Code already stores. `cmon web --no-network` turns that off and falls back to
+Claude Code's own cached copy.
 
 ## Quick start
 
@@ -93,12 +96,20 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
 | **Tools** | Main-thread vs subagent split per tool |
 
 ```bash
-cmon web --host 0.0.0.0 --port 9000
+cmon web --host 0.0.0.0 --port 9000   # ⚠ no authentication — see below
+cmon web --no-network                 # never call Anthropic for plan limits
 ```
 
 The sidebar carries a dark-mode switch, a re-scan button and a live-telemetry
 panel; every page has a time-window selector. Live state polls every 3s, the
 overview refreshes every 12s.
+
+**The server has no authentication.** On the default `127.0.0.1` that is fine —
+only this machine can reach it. Binding anywhere else hands your prompts, file
+paths and project names to everyone who can reach the port, and `cmon web`
+warns when you do. Requests must arrive with a `Host` of `localhost` or an IP
+literal and a same-origin `Origin`, which blocks DNS-rebinding and CSRF from
+whatever else the browser has open.
 
 </details>
 

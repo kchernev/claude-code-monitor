@@ -12,8 +12,11 @@ by (path, size, mtime). Only files that changed since the last run are re-read.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional
@@ -21,6 +24,13 @@ from typing import Callable, Dict, Iterable, List, Optional
 from .models import AgentRun, ApiCall, ModelStat, Session, Usage, _utc
 
 CACHE_VERSION = 8
+
+# Unique-per-record fallback identity. Never reuse ``id(rec)`` here: CPython
+# recycles addresses as records are garbage-collected between iterations, so
+# two unrelated records can share one, and the second would be silently
+# dropped as a duplicate. A counter can only ever err towards counting a
+# record, which is the safe direction.
+_FALLBACK_SEQ = itertools.count()
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +81,10 @@ def billing_key(rec: dict) -> tuple:
         return ("call", mid, rid)
     if mid:
         return ("msg", mid)
-    return ("uuid", rec.get("uuid") or id(rec))
+    uid = rec.get("uuid")
+    if uid:
+        return ("uuid", uid)
+    return ("seq", next(_FALLBACK_SEQ))
 
 
 def _apply_assistant(
@@ -249,7 +262,9 @@ def parse_agent_file(
     path: Path, session_id: str, seen: Optional[set] = None
 ) -> AgentRun:
     """Parse one ``subagents/**/agent-*.jsonl`` transcript."""
-    agent_id = path.stem.replace("agent-", "")
+    # Strip only the leading marker: an id that itself contains "agent-" must
+    # survive intact, or it stops matching the same file elsewhere.
+    agent_id = path.stem.replace("agent-", "", 1)
     run = AgentRun(agent_id=agent_id, session_id=session_id)
 
     meta = _read_agent_meta(path)
@@ -656,8 +671,26 @@ def _fingerprint(path: Path) -> str:
     return f"{st.st_size}:{int(st.st_mtime)}:{agent_sig}"
 
 
+# The cache holds prompt text, working directories and edited file paths, so
+# it is written 0600 inside a 0700 directory rather than at whatever the
+# ambient umask happens to be.
+_CACHE_DIR_MODE = 0o700
+_CACHE_FILE_MODE = 0o600
+# Live sessions change their transcript constantly and the index is measured
+# in megabytes; persisting on every 2-second refresh would mean rewriting the
+# whole file ~30 times a minute for a cache that is only an optimisation.
+_SAVE_MIN_INTERVAL_S = 30.0
+
+
 class Corpus:
-    """Loads and caches every session transcript on disk."""
+    """Loads and caches every session transcript on disk.
+
+    Not owned by one thread: the web server refreshes on a background thread
+    while a reindex request re-parses on the request thread, so the index dict
+    and the file it is written to are guarded by a reentrant lock. Without it,
+    serialising the index while another thread inserts into it raises
+    "dictionary changed size during iteration" and loses the save.
+    """
 
     def __init__(self, claude_dir: Optional[Path] = None, cache_dir: Optional[Path] = None):
         self.claude_dir = Path(
@@ -669,6 +702,9 @@ class Corpus:
         )
         self.cache_path = self.cache_dir / f"index-v{CACHE_VERSION}.json"
         self._cache: Dict[str, dict] = {}
+        self._last_save = 0.0
+        self._unsaved = False
+        self._lock = threading.RLock()
         self._load_cache()
 
     def _load_cache(self) -> None:
@@ -680,15 +716,50 @@ class Corpus:
         except (OSError, json.JSONDecodeError, ValueError):
             self._cache = {}
 
-    def save_cache(self) -> None:
+    def _prune_old_versions(self) -> None:
+        """Delete index files written by earlier cache formats."""
         try:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self.cache_path.with_suffix(".tmp")
-            with open(tmp, "w") as fh:
-                json.dump({"version": CACHE_VERSION, "entries": self._cache}, fh)
-            tmp.replace(self.cache_path)
+            for old in self.cache_dir.glob("index-v*.json"):
+                if old != self.cache_path:
+                    old.unlink()
         except OSError:
             pass
+
+    def save_cache(self, *, force: bool = True) -> None:
+        """Persist the index. ``force=False`` skips a save made too recently."""
+        with self._lock:
+            self._unsaved = True
+            now = time.monotonic()
+            if not force and now - self._last_save < _SAVE_MIN_INTERVAL_S:
+                return
+            # Unique temp name: two cmon processes sharing one cache directory
+            # must not write the same scratch file at the same time.
+            tmp = self.cache_path.with_name(
+                f"{self.cache_path.name}.{os.getpid()}.tmp"
+            )
+            # Serialise a snapshot, not the live dict: entries are whole-value
+            # replacements, so a shallow copy is cheap and means a write can
+            # never fail halfway with "dictionary changed size during iteration".
+            snapshot = dict(self._cache)
+            try:
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.chmod(self.cache_dir, _CACHE_DIR_MODE)
+                except OSError:
+                    pass
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                             _CACHE_FILE_MODE)
+                with os.fdopen(fd, "w") as fh:
+                    json.dump({"version": CACHE_VERSION, "entries": snapshot}, fh)
+                os.replace(tmp, self.cache_path)
+                self._last_save = now
+                self._unsaved = False
+                self._prune_old_versions()
+            except OSError:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     def session_paths(self) -> List[Path]:
         if not self.projects_dir.is_dir():
@@ -708,36 +779,39 @@ class Corpus:
         sessions: List[Session] = []
         dirty = False
 
-        for i, path in enumerate(all_paths):
-            key = str(path)
-            fp = _fingerprint(path)
-            entry = self._cache.get(key)
-            if not force and entry and entry.get("fp") == fp:
-                try:
-                    sessions.append(session_from_dict(entry["data"]))
-                    if progress:
-                        progress(i + 1, total, path.stem)
-                    continue
-                except (KeyError, TypeError, ValueError):
-                    pass  # Corrupt entry — fall through and re-parse.
+        # Held across the whole parse so a reindex on one thread and the
+        # background refresh on another cannot interleave into the index.
+        with self._lock:
+            for i, path in enumerate(all_paths):
+                key = str(path)
+                fp = _fingerprint(path)
+                entry = self._cache.get(key)
+                if not force and entry and entry.get("fp") == fp:
+                    try:
+                        sessions.append(session_from_dict(entry["data"]))
+                        if progress:
+                            progress(i + 1, total, path.stem)
+                        continue
+                    except (KeyError, TypeError, ValueError):
+                        pass  # Corrupt entry — fall through and re-parse.
 
-            sess = parse_session_file(path)
-            sessions.append(sess)
-            self._cache[key] = {"fp": fp, "data": session_to_dict(sess)}
-            dirty = True
-            if progress:
-                progress(i + 1, total, path.stem)
-
-        # Drop cache entries for transcripts that no longer exist.
-        if paths is None:
-            live_keys = {str(p) for p in all_paths}
-            stale = [k for k in self._cache if k not in live_keys]
-            for k in stale:
-                del self._cache[k]
+                sess = parse_session_file(path)
+                sessions.append(sess)
+                self._cache[key] = {"fp": fp, "data": session_to_dict(sess)}
                 dirty = True
+                if progress:
+                    progress(i + 1, total, path.stem)
 
-        if dirty:
-            self.save_cache()
+            # Drop cache entries for transcripts that no longer exist.
+            if paths is None:
+                live_keys = {str(p) for p in all_paths}
+                stale = [k for k in self._cache if k not in live_keys]
+                for k in stale:
+                    del self._cache[k]
+                    dirty = True
+
+            if dirty:
+                self.save_cache()
         return sessions
 
     def refresh(self, sessions: List[Session]) -> tuple:
@@ -752,22 +826,25 @@ class Corpus:
         result: List[Session] = []
         dirty = False
 
-        for path in self.session_paths():
-            key = str(path)
-            fp = _fingerprint(path)
-            entry = self._cache.get(key)
-            existing = by_path.get(key)
+        with self._lock:
+            for path in self.session_paths():
+                key = str(path)
+                fp = _fingerprint(path)
+                entry = self._cache.get(key)
+                existing = by_path.get(key)
 
-            if existing is not None and entry and entry.get("fp") == fp:
-                result.append(existing)
-                continue
+                if existing is not None and entry and entry.get("fp") == fp:
+                    result.append(existing)
+                    continue
 
-            sess = parse_session_file(path)
-            self._cache[key] = {"fp": fp, "data": session_to_dict(sess)}
-            dirty = True
-            changed.append(sess.session_id)
-            result.append(sess)
+                sess = parse_session_file(path)
+                self._cache[key] = {"fp": fp, "data": session_to_dict(sess)}
+                dirty = True
+                changed.append(sess.session_id)
+                result.append(sess)
 
-        if dirty:
-            self.save_cache()
+            if dirty:
+                # Throttled: a live session makes this path run every couple of
+                # seconds, and the index is far too big to rewrite that often.
+                self.save_cache(force=False)
         return result, changed

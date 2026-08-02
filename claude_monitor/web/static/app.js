@@ -399,7 +399,7 @@ function barList(items) {
         <div class="fill" style="width:${w.toFixed(2)}%;background:${
           i.muted ? 'var(--line2)' : (i.color || 'var(--vio)')}"></div></div>
       <span class="val">${esc(i.text)}<i>${esc(i.sub || '')}</i></span>`;
-    if (i.href) return `<a class="brow" href="${i.href}">${inner}</a>`;
+    if (i.href) return `<a class="brow" href="${esc(i.href)}">${inner}</a>`;
     if (i.act) return `<button type="button" class="brow" data-act="${esc(i.act)}"
       title="Show what ${esc(i.label)} actually ran">${inner}</button>`;
     return `<div class="brow">${inner}</div>`;
@@ -514,9 +514,13 @@ const agentPill = state2 => {
   const [cls, label] = AGENT_ST[state2] || ['done', state2];
   return `<span class="st ${cls}"><i></i>${label}</span>`;
 };
-const avatar = name =>
-  `<span class="av" style="background:${hueFor(name)}22;color:${hueFor(name)}">${
-    esc(String(name)[0].toUpperCase())}</span>`;
+const avatar = name => {
+  // A project can legitimately have no name (transcript with no cwd); indexing
+  // [0] on '' would throw and take the whole view down with it.
+  const s = String(name ?? '').trim();
+  return `<span class="av" style="background:${hueFor(s)}22;color:${hueFor(s)}">${
+    esc(s ? s[0].toUpperCase() : '?')}</span>`;
+};
 
 // ── table (rows are real links; headers optionally sortable) ──────────
 function table(cols, rows, opts = {}) {
@@ -537,7 +541,10 @@ function table(cols, rows, opts = {}) {
   const body = rows.map(r => {
     const cells = cols.map(c => {
       let v = r[c.key] ?? '';
-      if (r._href && c === linkCol) v = `<a class="rowlink" href="${r._href}">${v}</a>`;
+      // Escape centrally: _href carries ids taken from transcript filenames,
+      // so it is not ours to trust even though it is normally a UUID.
+      if (r._href && c === linkCol)
+        v = `<a class="rowlink" href="${esc(r._href)}">${v}</a>`;
       return `<td class="${c.n ? 'n' : ''} ${c.grow ? 'grow' : ''} ${
         c.cls || ''}">${v}</td>`;
     }).join('');
@@ -815,7 +822,7 @@ views.sessions = async (params) => {
     const st = sessStatus(s);
     return {
       _href: `#/session/${s.id}`,
-      id: `#${s.short.slice(0, 6)}`,
+      id: `#${esc(s.short.slice(0, 6))}`,
       sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
       turns: s.turns, calls: s.api_calls.toLocaleString(),
@@ -1161,23 +1168,30 @@ views.workflows = async () => {
   };
 
   const cards = wfs.map(w => {
-    const t0 = Math.min(...w.lanes.map(l => l.start || Infinity));
-    const t1 = Math.max(...w.lanes.map(l => l.end || 0));
+    // An agent that never wrote a timestamp has no start or end; clamp it to
+    // the run's own bounds so its bar renders instead of computing to NaN.
+    const starts = w.lanes.map(l => l.start).filter(v => v != null);
+    const ends = w.lanes.map(l => l.end).filter(v => v != null);
+    const t0 = starts.length ? Math.min(...starts) : 0;
+    const t1 = Math.max(ends.length ? Math.max(...ends) : 0, t0);
     const span = Math.max(1, t1 - t0);
+    const at = l => (l.start != null ? l.start : t0);
+    const to = l => (l.end != null ? l.end : t1);
     const ordered = w.lanes.slice()
-      .sort((a, b) => ((b.end || t1) - b.start) - ((a.end || t1) - a.start));
-    const shortLabels = trimCommon(ordered.map(l => l.topic));
+      .sort((a, b) => (to(b) - at(b)) - (to(a) - at(a)));
+    const shortLabels = trimCommon(ordered.map(l => l.topic || ''));
     const lanes = ordered.map((l, li) => {
-      const x = ((l.start - t0) / span) * 100;
-      const wd = Math.max(0.6, (((l.end || t1) - l.start) / span) * 100);
+      const x = ((at(l) - t0) / span) * 100;
+      const wd = Math.max(0.6, ((to(l) - at(l)) / span) * 100);
       const col = l.state === 'running' ? 'var(--gold)'
                 : l.state === 'stopped' ? 'var(--line2)' : 'var(--vio)';
+      const topic = l.topic || '(untitled)';
       return `<div class="glane">
-        <span class="gl" title="${esc(l.topic)}">${esc(shortLabels[li].slice(0, 60))}</span>
+        <span class="gl" title="${esc(topic)}">${esc(shortLabels[li].slice(0, 60))}</span>
         <div class="gtrack"><div class="gbar" style="left:${x.toFixed(2)}%;width:${
           wd.toFixed(2)}%;background:${col}"
-          data-tip="${esc(l.topic.slice(0, 70))}\n${esc(usd(l.cost))} · ${
-          esc(tok(l.tokens))} tokens\n${esc(dur((l.end || t1) - l.start))}"></div></div></div>`;
+          data-tip="${esc(topic.slice(0, 70))}\n${esc(usd(l.cost))} · ${
+          esc(tok(l.tokens))} tokens\n${esc(dur(to(l) - at(l)))}"></div></div></div>`;
     }).join('');
     const ticks = [0, .25, .5, .75, 1].map(f =>
       `<span>${f === 0 ? '0' : esc(dur(span * f))}</span>`).join('');

@@ -120,6 +120,17 @@ class ResourceMonitor:
         extends past the process start time. Each session is claimed at most
         once, so N concurrent sessions in one directory map to N processes.
         """
+        # Clear first, every time. The long-running web server hands the same
+        # Session objects back to attach() on each refresh, and a session whose
+        # process has exited stops changing its transcript — so without this it
+        # would keep the pid it was given and read as live forever.
+        for s in sessions:
+            s.pid = None
+            s.cpu_percent = 0.0
+            s.rss_bytes = 0
+            s.num_threads = 0
+            s.proc_started = None
+
         procs = self.scan()
         if not procs:
             return []

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import ipaddress
 import json
 import threading
 import time
@@ -100,7 +101,7 @@ def _limit_entry(lim: dict, now: datetime) -> dict:
         try:
             delta = (datetime.fromisoformat(raw) - now).total_seconds()
             resets_in = max(0, int(delta)) if delta > 0 else None
-        except ValueError:
+        except (TypeError, ValueError):
             pass
     return {
         "key": kind,
@@ -113,14 +114,14 @@ def _limit_entry(lim: dict, now: datetime) -> dict:
     }
 
 
-def plan_payload() -> dict:
+def plan_payload(*, allow_network: bool = True) -> dict:
     """Subscription tier and limit utilization.
 
     Utilization comes live from Anthropic's OAuth usage endpoint (the same
     request Claude Code makes, with the token it already stores); when that
-    fails — offline, token expired — it falls back to Claude Code's own cached
-    copy in ~/.claude.json, with age_s saying how stale it is. Transcript data
-    is never sent anywhere.
+    fails — offline, token expired, ``allow_network`` off — it falls back to
+    Claude Code's own cached copy in ~/.claude.json, with age_s saying how
+    stale it is. Transcript data is never sent anywhere.
     """
     try:
         state = json.loads(CLAUDE_STATE.read_text())
@@ -143,7 +144,7 @@ def plan_payload() -> dict:
     }
 
     now = datetime.now(timezone.utc)
-    util = _fetch_live_usage()
+    util = _fetch_live_usage() if allow_network else None
     if util is not None:
         payload["source"] = "live"
         payload["age_s"] = 0
@@ -167,6 +168,68 @@ def plan_payload() -> dict:
             "reason": extra.get("disabled_reason") or "",
         }
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Request origin guard
+# ---------------------------------------------------------------------------
+
+
+def _hostname_of(host_header: str) -> str:
+    """Hostname part of a ``Host`` header, port and IPv6 brackets removed."""
+    host = (host_header or "").strip()
+    if host.startswith("["):                      # [::1]:8787
+        end = host.find("]")
+        return host[1:end] if end != -1 else ""
+    if host.count(":") == 1:                      # name:port / v4:port
+        host = host.rsplit(":", 1)[0]
+    return host
+
+
+def host_is_trusted(host_header: str) -> bool:
+    """True when ``Host`` names this machine by IP literal or ``localhost``.
+
+    DNS rebinding is why this exists. Everything served here — prompts, file
+    paths, working directories — is readable by any page the browser loads if
+    that page can make same-origin requests to us: the attacker points their
+    own hostname at 127.0.0.1, waits for the TTL to flip, and the browser
+    treats http://evil.example:8787 as same-origin with us.
+
+    Rebinding needs a *name*, because an IP literal cannot be re-pointed. So
+    accept only IP literals and localhost, which closes the attack while
+    leaving `--host 0.0.0.0` reachable from the LAN by address.
+    """
+    host = _hostname_of(host_header)
+    if not host:
+        return False
+    lowered = host.lower()
+    if lowered == "localhost" or lowered.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def install_origin_guard(app: Flask) -> None:
+    """Reject requests that a browser on another origin could have forged."""
+
+    @app.before_request
+    def _guard():
+        if not host_is_trusted(request.headers.get("Host", "")):
+            return (
+                jsonify({"error": "untrusted Host header — "
+                                  "reach this server by IP or localhost"}),
+                403,
+            )
+        # A same-origin fetch either omits Origin (plain GET) or sends exactly
+        # our own origin. Anything else is another site talking to us, which
+        # for a POST would be CSRF.
+        origin = request.headers.get("Origin")
+        if origin and origin.rstrip("/") != request.host_url.rstrip("/"):
+            return jsonify({"error": "cross-origin request refused"}), 403
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +463,8 @@ def filtered(store: DataStore) -> List[Session]:
 # ---------------------------------------------------------------------------
 
 
-def create_app(claude_dir: Optional[Path] = None) -> Flask:
+def create_app(claude_dir: Optional[Path] = None, *,
+               allow_network: bool = True) -> Flask:
     app = Flask(
         __name__,
         static_folder=str(HERE / "static"),
@@ -408,16 +472,21 @@ def create_app(claude_dir: Optional[Path] = None) -> Flask:
     )
     # Local tool: assets must never go stale in the browser after an upgrade.
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+    app.config["ALLOW_NETWORK"] = allow_network
     store = DataStore(claude_dir=claude_dir)
     app.config["STORE"] = store
+    install_origin_guard(app)
 
     # -- frontend ---------------------------------------------------------
     @app.route("/")
     def index():
         static = HERE / "static"
-        version = int(max(
-            (static / name).stat().st_mtime for name in ("style.css", "app.js")
-        ))
+        try:
+            version = int(max(
+                (static / name).stat().st_mtime for name in ("style.css", "app.js")
+            ))
+        except OSError:
+            version = 0
         html = (HERE / "templates" / "index.html").read_text()
         resp = app.make_response(html.replace("__V__", str(version)))
         resp.mimetype = "text/html"
@@ -427,7 +496,7 @@ def create_app(claude_dir: Optional[Path] = None) -> Flask:
     # -- plan & limits ----------------------------------------------------
     @app.route("/api/plan")
     def api_plan():
-        return jsonify(plan_payload())
+        return jsonify(plan_payload(allow_network=app.config["ALLOW_NETWORK"]))
 
     # -- global summary ---------------------------------------------------
     @app.route("/api/summary")
@@ -504,42 +573,12 @@ def create_app(claude_dir: Optional[Path] = None) -> Flask:
         })
 
     # -- live poll --------------------------------------------------------
-    def _now_rate(live_sessions: List[Session], window_s: float) -> tuple:
-        """(USD/hour, output tok/s) over the trailing window ending NOW.
-
-        Anchoring at wall-clock now matters: a lifetime average — or a window
-        anchored at a session's own last write — keeps reporting yesterday's
-        burst as if it were current. Main-thread calls are exact; agents are
-        apportioned by how much of their runtime overlaps the window.
-        """
-        now = time.time()
-        lo = now - window_s
-        cost = out = 0.0
-        for s in live_sessions:
-            for ts, o, _ctx, c in reversed(s.timeline):
-                if ts < lo:
-                    break
-                cost += c
-                out += o
-            for a in s.agents:
-                if not a.started:
-                    continue
-                t0 = a.started.timestamp()
-                t1 = a.ended.timestamp() if a.ended else now
-                overlap = min(now, t1) - max(lo, t0)
-                if overlap <= 0:
-                    continue
-                frac = overlap / max(1.0, t1 - t0)
-                cost += a.cost * frac
-                out += a.usage.output_tokens * frac
-        return cost / window_s * 3600.0, out / window_s
-
     @app.route("/api/live")
     def api_live():
         sessions = store.sessions()
         live = [s for s in sessions if s.is_live]
-        burn, _ = _now_rate(live, 900.0)
-        _, tps_now = _now_rate(live, 120.0)
+        burn, _ = analytics.recent_rates(live, 900.0)
+        _, tps_now = analytics.recent_rates(live, 120.0)
         running_agents = [
             agent_json(a, parent_live=True, project=s.project)
             for s in live for a in s.agents
@@ -575,7 +614,7 @@ def create_app(claude_dir: Optional[Path] = None) -> Flask:
         }
         keyfn = keys.get(sort, keys["recent"])
         rows = sorted(sessions, key=keyfn, reverse=True)
-        limit = request.args.get("limit", type=int) or 200
+        limit = max(1, min(request.args.get("limit", type=int) or 200, 2000))
         return jsonify({
             "total": len(rows),
             "sessions": [session_brief(s) for s in rows[:limit]],
@@ -669,7 +708,6 @@ def create_app(claude_dir: Optional[Path] = None) -> Flask:
     @app.route("/api/agents")
     def api_agents():
         sessions = filtered(store)
-        by_sid = {s.session_id: s for s in sessions}
         rows: List[dict] = []
         for s in sessions:
             for a in s.agents:
@@ -690,7 +728,7 @@ def create_app(claude_dir: Optional[Path] = None) -> Flask:
             "duration": lambda r: r["duration_s"],
         }
         rows.sort(key=keyfns.get(sort, keyfns["recent"]), reverse=True)
-        limit = request.args.get("limit", type=int) or 300
+        limit = max(1, min(request.args.get("limit", type=int) or 300, 3000))
 
         costs = sorted(r["cost"] for r in rows)
         return jsonify({
@@ -1019,8 +1057,10 @@ def serve(
     port: int = 8787,
     *,
     claude_dir: Optional[Path] = None,
-    debug: bool = False,
+    allow_network: bool = True,
 ) -> None:
-    app = create_app(claude_dir=claude_dir)
+    # No debug switch on purpose: Werkzeug's debugger is an interactive shell
+    # on a server that reads your whole transcript history.
+    app = create_app(claude_dir=claude_dir, allow_network=allow_network)
     app.config["STORE"].load_initial()
-    app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=False)
+    app.run(host=host, port=port, threaded=True, use_reloader=False)
