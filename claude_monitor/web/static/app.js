@@ -1015,6 +1015,27 @@ views.overview = async () => {
 
 // ── projects (the primary hierarchy: project → everything scoped) ─────
 
+/** Crumb inside a project: Projects / <name> / trail… */
+function projectCrumb(project, ...trail) {
+  const P = encodeURIComponent(project);
+  return `<div class="crumb"><a href="#/projects">Projects</a> /
+    <a href="#/project/${P}">${esc(project)}</a>${
+    trail.map(t => ` / ${t}`).join('')}</div>`;
+}
+
+/** Section chips shown on every page of a project, current one lit. */
+function projectSecnav(project, active) {
+  const P = encodeURIComponent(project);
+  const items = [['', 'Overview'], ['sessions', 'Sessions'],
+    ['agents', 'Agents'], ['workflows', 'Workflows'],
+    ['cost', 'Cost'], ['tools', 'Tools']];
+  return `<div class="secnav">${items.map(([k, l]) => {
+    const href = k ? `#/${k}?project=${P}` : `#/project/${P}`;
+    const on = active === (k || 'home');
+    return `<a href="${href}" class="${on ? 'on' : ''}">${l}</a>`;
+  }).join('')}</div>`;
+}
+
 views.projects = async () => {
   const [d, sess] = await Promise.all([
     api('/api/summary'),
@@ -1201,10 +1222,12 @@ views.sessions = async (params) => {
   };
 
   $('#view').innerHTML = `
+    ${project ? projectCrumb(project, 'Sessions') + projectSecnav(project, 'sessions') : ''}
     <div class="hd">
-      <div><h1>Sessions</h1><p class="sub">${d.total} session${
+      <div><h1>Sessions${project ? ` — ${esc(project)}` : ''}</h1><p class="sub">${
+        d.total} session${
         d.total === 1 ? '' : 's'} in the last ${winLabel()}${
-        project ? ` · ${esc(project)}` : ''}${q ? ` · matching “${esc(q)}”` : ''}</p></div>
+        q ? ` · matching “${esc(q)}”` : ''}</p></div>
       <div class="right">
         ${project || q ? `<a class="btn" href="#/sessions">Clear filters ✕</a>` : ''}
         <input type="search" id="q" placeholder="Search titles, prompts, paths…"
@@ -1256,7 +1279,9 @@ views.session = async (params, sid) => {
   ];
 
   $('#view').innerHTML = `
-    <div class="crumb"><a href="#/sessions">Sessions</a> / ${esc(s.short)}</div>
+    ${projectCrumb(s.project,
+      `<a href="#/sessions?project=${encodeURIComponent(s.project)}">Sessions</a>`,
+      esc(s.short))}
     <div class="hd">
       <div><h1>${esc(s.title)}</h1>
         <p class="sub">${esc(s.project)} · ${esc(s.branch || 'no branch')} ·
@@ -1585,8 +1610,7 @@ views.agents = async (params) => {
   };
 
   $('#view').innerHTML = `
-    ${project ? `<div class="crumb"><a href="#/agents">Agents</a> / ${
-      esc(project)}</div>` : ''}
+    ${project ? projectCrumb(project, 'Agents') + projectSecnav(project, 'agents') : ''}
     <div class="hd">
       <div><h1>Agents${project ? ` — ${esc(project)}` : ''}</h1>
         <p class="sub">${d.total} subagent runs across ${
@@ -1640,9 +1664,10 @@ views.agents = async (params) => {
 views.agent = async (params, sid, aid) => {
   const a = await api(`/api/agents/${sid}/${aid}`);
   $('#view').innerHTML = `
-    <div class="crumb"><a href="#/agents">Agents</a> /
-      <a href="#/session/${esc(sid)}">${esc(a.session_title || sid.slice(0, 8))}</a> /
-      ${esc(a.id.slice(0, 10))}</div>
+    ${projectCrumb(a.project,
+      `<a href="#/agents?project=${encodeURIComponent(a.project)}">Agents</a>`,
+      `<a href="#/session/${esc(sid)}">${esc(a.session_title || sid.slice(0, 8))}</a>`,
+      esc(a.id.slice(0, 10)))}
     <div class="hd">
       <div><h1>${esc(a.topic)}</h1>
         <p class="sub">${esc(a.type)} · ${esc(a.model_label)} · ${esc(a.project)}${
@@ -1750,6 +1775,7 @@ views.workflows = async (params) => {
   }).join('');
 
   $('#view').innerHTML = `
+    ${project ? projectCrumb(project, 'Workflows') + projectSecnav(project, 'workflows') : ''}
     <div class="hd"><div><h1>Workflows${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">${wfs.length} fan-out runs · each bar is one agent, positioned
         by when it ran</p></div>
@@ -1944,7 +1970,9 @@ views.workflow = async (params, sid, wfid) => {
     : `<span class="st done"><i></i>${c.done}/${c.total} done</span>`;
 
   $('#view').innerHTML = `
-    <div class="crumb"><a href="#/workflows">Workflows</a> / ${esc(d.short)}</div>
+    ${projectCrumb(d.project,
+      `<a href="#/workflows?project=${encodeURIComponent(d.project)}">Workflows</a>`,
+      esc(d.short))}
     <div class="hd">
       <div><h1>${esc(d.name || d.topic || d.short)} ${statusPill}</h1>
         <p class="sub">${d.description ? `${esc(d.description)} · ` : ''}${
@@ -2464,7 +2492,7 @@ async function gitRepoView(params, rid) {
   }).join('');
 
   $('#view').innerHTML = `
-    <div class="crumb"><a href="#/git">Git</a> / ${esc(d.name)}</div>
+    ${projectCrumb(d.project, 'Git', esc(d.name))}
     <div class="hd">
       <div><h1>${avatar(d.name)} ${esc(d.name)}
         ${d.live ? `<span class="st live" style="margin-left:8px"><i></i>${
@@ -2613,6 +2641,7 @@ views.cost = async (params) => {
     ['Input, uncached', 'input', SERIES[4]],
   ];
   $('#view').innerHTML = `
+    ${project ? projectCrumb(project, 'Cost') + projectSecnav(project, 'cost') : ''}
     <div class="hd"><div><h1>Cost${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">Last ${winLabel()} · all figures are API list-price equivalents,
         not amounts billed.</p></div>
@@ -2713,6 +2742,7 @@ views.tools = async (params) => {
   const total = d.tools.reduce((a, b) => a + b.total, 0) || 1;
   const max = Math.max(...d.tools.map(x => x.total), 1);
   $('#view').innerHTML = `
+    ${project ? projectCrumb(project, 'Tools') + projectSecnav(project, 'tools') : ''}
     <div class="hd"><div><h1>Tools${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">${total.toLocaleString()} tool calls in the last ${winLabel()}
         · main thread vs subagents · click a tool to see what it ran</p></div>
@@ -2760,9 +2790,7 @@ async function route(silent) {
   const seg = path.split('/').filter(Boolean);
   const name = seg[0] || 'overview';
 
-  const PARENT = { session: 'sessions', agent: 'agents', workflow: 'workflows',
-                   project: 'projects' };
-  const section = PARENT[name] || name;
+  const section = name === 'overview' ? 'overview' : 'projects';
   $$('.nav a').forEach(a => {
     const on = a.getAttribute('href') === '#/' + section;
     a.classList.toggle('active', on);
