@@ -1241,11 +1241,87 @@ views.session = async (params, sid) => {
 views.agents = async (params) => {
   const q = params.get('q') || '', type = params.get('type') || '';
   const sort = params.get('sort') || 'cost';
-  const d = await api('/api/agents', { q, type, sort });
+  const [d, sess] = await Promise.all([
+    api('/api/agents', { q, type, sort, limit: 1500 }),
+    api('/api/sessions', { limit: 2000 }),
+  ]);
+  const smeta = {};
+  for (const s of sess.sessions) smeta[s.id] = s;
+
+  // Hierarchy: session → workflow fan-outs → agents (spawn depth indents).
+  // Group in server order, so the running-first pinning and the chosen sort
+  // survive inside each group.
+  const bySession = new Map();
+  for (const a of d.agents) {
+    if (!bySession.has(a.session_id)) bySession.set(a.session_id, []);
+    bySession.get(a.session_id).push(a);
+  }
+  const groups = [...bySession.entries()].map(([sid, list]) => ({
+    sid, list,
+    running: list.filter(a => a.state === 'running').length,
+    cost: list.reduce((x, a) => x + a.cost, 0),
+    latest: list.reduce((x, a) =>
+      Math.max(x, a.started ? Date.parse(a.started) : 0), 0),
+  }));
+  groups.sort((a, b) => (b.running - a.running) || (b.latest - a.latest));
+
+  const agentRow = a => `
+    <a class="agrow" href="#/agent/${esc(a.session_id)}/${esc(a.id)}">
+      <span>${agentPill(a.state)}</span>
+      <span class="t${a.spawn_depth > 1 ? ' deep' : ''}" title="${esc(a.topic)}">${
+        a.spawn_depth > 1 ? '<i class="depthmark">└</i>' : ''}${esc(a.topic)}</span>
+      <span class="mut">${esc(a.type)}</span>
+      <span><span class="mchip">${esc(a.model_label)}</span></span>
+      <span class="num">${tok(a.tokens)}</span>
+      <span class="dur">${dur(a.duration_s)}</span>
+      <span class="num cost">${usd(a.cost)}</span>
+      <span class="dur">${ago(a.started)}</span>
+    </a>`;
+
+  const sessionBlock = (g, idx) => {
+    const m = smeta[g.sid] || {};
+    // Sub-group workflow fan-outs, keeping first-appearance order.
+    const wfs = new Map();
+    const direct = [];
+    for (const a of g.list) {
+      if (a.workflow_id) {
+        if (!wfs.has(a.workflow_id)) wfs.set(a.workflow_id, []);
+        wfs.get(a.workflow_id).push(a);
+      } else direct.push(a);
+    }
+    const wfHtml = [...wfs.entries()].map(([wid, arr]) => `
+      <div class="wfgrp">
+        <div class="wfhead">
+          <span class="refchip">⑃ ${esc(wid.replace('wf_', ''))}</span>
+          <span class="mut">workflow fan-out · ${arr.length} agent${
+            arr.length === 1 ? '' : 's'} · ${usd(arr.reduce((x, a) => x + a.cost, 0))}</span>
+          <a href="#/workflows">workflows →</a>
+        </div>
+        ${arr.map(agentRow).join('')}
+      </div>`).join('');
+    const open = g.running > 0 || idx < 3;
+    return `
+    <details class="agsess"${open ? ' open' : ''}>
+      <summary>
+        <i class="caret" aria-hidden="true"></i>
+        ${avatar(m.project || '?')}
+        <span class="s1"><b>${esc(m.project || g.sid.slice(0, 8))}</b>
+          <span class="tp">${esc(m.title || '')}</span></span>
+        ${g.running ? `<span class="st live"><i></i>${g.running} running</span>`
+          : (m.live ? '<span class="st idle"><i></i>live session</span>' : '')}
+        <span class="num mut">${g.list.length} agent${
+          g.list.length === 1 ? '' : 's'}</span>
+        <span class="num cost">${usd(g.cost)}</span>
+        <a class="btn" href="#/session/${esc(g.sid)}">session →</a>
+      </summary>
+      <div class="agbody">${wfHtml}${direct.map(agentRow).join('')}</div>
+    </details>`;
+  };
 
   $('#view').innerHTML = `
     <div class="hd">
-      <div><h1>Agents</h1><p class="sub">${d.total} subagent runs in the last ${
+      <div><h1>Agents</h1><p class="sub">${d.total} subagent runs across ${
+        groups.length} session${groups.length === 1 ? '' : 's'} in the last ${
         winLabel()}</p></div>
       <div class="right">
         ${type ? `<a class="btn" href="#/agents">Clear ✕</a>` : ''}
@@ -1277,37 +1353,28 @@ views.agents = async (params) => {
         })))}</div></div>
     </section>
 
-    <section class="blk">${table([
-      { h: 'Topic', key: 'topic', grow: 1, link: 1 },
-      { h: 'Type', key: 'type' }, { h: 'Project', key: 'proj' },
-      { h: 'Model', key: 'model' }, { h: 'Calls', key: 'calls', n: 1 },
-      { h: 'Tokens', key: 'tk', n: 1 }, { h: 'Time', key: 'time', n: 1 },
-      { h: 'Tok/s', key: 'tps', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
-      { h: 'Status', key: 'st' }, { h: 'When', key: 'when', n: 1 }],
-      d.agents.map(a => ({
-        _href: `#/agent/${a.session_id}/${a.id}`,
-        topic: esc(a.topic),
-        type: `<span class="mut">${esc(a.type)}</span>`,
-        proj: `<span class="mut">${esc(a.project)}</span>`,
-        model: `<span class="mchip">${esc(a.model_label)}</span>`,
-        calls: a.api_calls, tk: tok(a.tokens),
-        time: `<span class="dur">${dur(a.duration_s)}</span>`,
-        tps: a.output_tps.toFixed(0), cost: usd(a.cost),
-        st: agentPill(a.state),
-        when: `<span class="dur">${ago(a.started)}</span>`,
-      })))}</section>`;
+    <section class="blk">
+      <div class="aghead"><span></span><span>Topic</span><span>Type</span>
+        <span>Model</span><span class="r">Tokens</span><span class="r">Time</span>
+        <span class="r">Cost</span><span class="r">Started</span></div>
+      ${groups.map(sessionBlock).join('') ||
+        '<div class="empty"><b>No agents match</b>Try a different search or window.</div>'}
+    </section>`;
 
   hydrateTips($('#view'));
-  wireTable($('#view'));
   wireWindow($('#view'));
   colChart($('#dist'), d.distribution.map(b => ({
     v: b.count, label: usd(b.lo),
     tip: `${usd(b.lo)} – ${usd(b.hi)}\n${b.count} agents`,
   })), { height: 138, fmt: v => Math.round(v) });
+  // Links inside <summary> must not toggle the group.
+  $$('.agsess summary a').forEach(a =>
+    a.addEventListener('click', e => e.stopPropagation()));
   $$('#sortSeg button').forEach(b => b.addEventListener('click', () => {
     const p = new URLSearchParams(location.hash.split('?')[1] || '');
     p.set('sort', b.dataset.k);
-    location.hash = '#/agents?' + p;
+    history.replaceState(null, '', '#/agents?' + p);
+    route(true);
   }));
   const qi = $('#q');
   qi.addEventListener('input', debounce(() => {
