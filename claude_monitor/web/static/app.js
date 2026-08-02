@@ -1544,9 +1544,9 @@ views.git = async (params) => {
   $('#view').innerHTML = `
     <div class="hd">
       <div><h1>Git</h1><p class="sub">${d.repos.length} repositor${
-        d.repos.length === 1 ? 'y' : 'ies'} from your sessions · sampled every ${
-        d.interval.toFixed(0)}s</p></div>
-      <div class="right">${gitTabs('live')}</div>
+        d.repos.length === 1 ? 'y' : 'ies'} with sessions in the last ${
+        winLabel()} · sampled every ${d.interval.toFixed(0)}s</p></div>
+      <div class="right">${windowPicker()}${gitTabs('live')}</div>
     </div>
 
     <div class="kpis">
@@ -1592,6 +1592,7 @@ views.git = async (params) => {
       '<div class="empty"><b>No repositories found</b>No session ran inside a git repository.</div>'}</div>`;
 
   hydrateTips($('#view'));
+  wireWindow($('#view'));
   wireGitTabs('live');
   gitChart($('#gitCommitted'), h.points,
            { mode: 'committed', commits: h.commits,
@@ -1618,10 +1619,12 @@ async function gitStatsView(params, repo) {
   $('#view').innerHTML = `
     <div class="hd">
       <div><h1>Git</h1><p class="sub">Commit analytics${scoped
-        ? ` — ${esc(scoped.name)}` : ` across ${d.repos.length} repos`} · last ${
+        ? ` — ${esc(scoped.name)}` : ` across ${d.repos.length} repos (sessions
+        in the last ${winLabel()})`} · commits from the last ${
         (GIT_STAT_RANGES.find(([v]) => v === rng) || [0, '?'])[1]}</p></div>
       <div class="right">
         ${scoped ? `<a class="btn" href="#/git?view=stats">All repos ✕</a>` : ''}
+        ${windowPicker()}
         <div class="pills" id="gitRange" role="group" aria-label="Stats range">
           ${GIT_STAT_RANGES.map(([v, l]) =>
             `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
@@ -1674,6 +1677,7 @@ async function gitStatsView(params, repo) {
     </section>`;
 
   hydrateTips($('#view'));
+  wireWindow($('#view'));
   wireGitTabs('stats');
   const bl = st.buckets;
   const blab = b => st.per_day

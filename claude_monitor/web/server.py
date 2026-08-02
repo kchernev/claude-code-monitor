@@ -847,20 +847,22 @@ def create_app(claude_dir: Optional[Path] = None, *,
     # -- git --------------------------------------------------------------
     @app.route("/api/git")
     def api_git():
-        return jsonify(gitmon.snapshot())
+        return jsonify(gitmon.snapshot(days=request.args.get("days", type=int)))
 
     @app.route("/api/git/history")
     def api_git_history():
         rng = max(900, min(request.args.get("range", type=int) or 3600, 86400))
         repo = (request.args.get("repo") or "all").strip()
-        return jsonify(gitmon.history(repo, rng))
+        return jsonify(gitmon.history(
+            repo, rng, days=request.args.get("days", type=int)))
 
     @app.route("/api/git/stats")
     def api_git_stats():
         rng = max(3600, min(request.args.get("range", type=int) or 604800,
                             30 * 86400))
         repo = (request.args.get("repo") or "all").strip()
-        return jsonify(gitmon.stats(repo, rng))
+        return jsonify(gitmon.stats(
+            repo, rng, days=request.args.get("days", type=int)))
 
     # -- misc -------------------------------------------------------------
     @app.route("/api/reindex", methods=["POST"])

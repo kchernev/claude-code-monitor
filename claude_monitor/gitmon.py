@@ -356,11 +356,12 @@ class GitMonitor:
         self._stats_log[rid] = (now, commits)
         return commits
 
-    def stats(self, repo_sel: str, range_s: int) -> dict:
+    def stats(self, repo_sel: str, range_s: int,
+              days: Optional[int] = None) -> dict:
         """Commit analytics across repos for the window (GitMonitor's Stats tab)."""
         now = time.time()
         start = now - range_s
-        repos = self._all_repos()
+        repos = self._shown(days)
         if repo_sel != "all":
             repos = [r for r in repos if r["id"] == repo_sel]
         multi = len(repos) > 1
@@ -438,14 +439,24 @@ class GitMonitor:
         with self._lock:
             return [dict(r) for r in self._repos.values()]
 
-    def snapshot(self) -> dict:
-        """Every repo discovered from the sessions — no window filtering.
+    def _shown(self, days: Optional[int]) -> List[dict]:
+        """Repos with session activity inside the window; live always counts.
 
-        The session corpus is the filter: if Claude ever had a session in a
-        git repo, it's listed.
+        ``days`` falsy means everything — the "All" pill.
         """
-        now = time.time()
         repos = self._all_repos()
+        if days:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            repos = [
+                r for r in repos
+                if r["live"] or (r["last_activity"]
+                                 and r["last_activity"] >= cutoff)
+            ]
+        return repos
+
+    def snapshot(self, days: Optional[int] = None) -> dict:
+        now = time.time()
+        repos = self._shown(days)
         out = []
         tot = {"wip": 0, "staged": 0, "unstaged": 0, "untracked": 0,
                "committed_today": 0, "commits_today": 0, "dirty": 0}
@@ -493,7 +504,8 @@ class GitMonitor:
             "sampling_since": self.started_at,
         }
 
-    def history(self, repo_sel: str, range_s: int) -> dict:
+    def history(self, repo_sel: str, range_s: int,
+                days: Optional[int] = None) -> dict:
         """WIP + committed series and commit markers over the trailing window.
 
         WIP comes from the in-memory samples (buckets with no sample within the
@@ -503,7 +515,7 @@ class GitMonitor:
         """
         now = time.time()
         start = now - range_s
-        repos = self._all_repos()
+        repos = self._shown(days)
         if repo_sel != "all":
             repos = [r for r in repos if r["id"] == repo_sel]
         rids = [r["id"] for r in repos]
