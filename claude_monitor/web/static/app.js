@@ -613,8 +613,14 @@ function wireWindow(root) {
     b.addEventListener('click', () => {
       state.days = +b.dataset.d;
       localStorage.setItem('cm.days', state.days);
+      // Instant feedback on the pills, then swap the content in place — a
+      // full route() blanks the page to a skeleton and resets scroll for
+      // what is just a data change.
+      $$('.pills button[data-d]').forEach(x =>
+        x.classList.toggle('on', +x.dataset.d === state.days));
+      const y = scrollY;
       invalidateApi();
-      route();
+      route(true).then(() => scrollTo(0, y));
     }));
 }
 
@@ -743,7 +749,7 @@ views.overview = async () => {
     <div class="hd">
       <div><h1>${greeting()}, ${esc(d.user || 'there')} 👋</h1>
         <div class="sub">Here's what your agents are doing right now.</div></div>
-      <div class="right">${todayChip()}</div>
+      <div class="right">${windowPicker()}${todayChip()}</div>
     </div>
 
     ${alerts.length
@@ -835,10 +841,9 @@ views.overview = async () => {
         <div class="cb"><div id="dailyBars"></div></div>
       </div>
       <div class="card">
-        <div class="ch"><h2>Spend, cumulative
-          <span style="color:var(--green);font-size:12px;margin-left:8px">${
-            usd(windowSpend)} in the last ${winLabel()}</span></h2>
-          ${windowPicker()}</div>
+        <div class="ch"><h2>Spend, cumulative</h2>
+          <span class="meta" style="color:var(--green)">${
+            usd(windowSpend)} in the last ${winLabel()}</span></div>
         <div class="cb"><div id="wave"></div></div>
       </div>
     </section>
