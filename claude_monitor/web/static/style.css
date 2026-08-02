@@ -114,6 +114,21 @@ a{color:inherit;text-decoration:none}
 .dm[aria-checked="true"] .sw2 i{left:18px;background:#17181c}
 /* running-agents count inside the Agents column */
 .agr{color:var(--gold);font-weight:700}
+
+/* plan limits as one horizontal strip on the dashboard */
+.planstrip{display:flex;align-items:flex-start;gap:26px;padding:14px 20px 11px;
+           margin-bottom:16px;flex-wrap:wrap}
+.planstrip .pls-head{flex:none;min-width:120px;display:flex;
+                     flex-direction:column;gap:3px}
+.planstrip .pls-head h2{margin:0;font-size:14px;letter-spacing:-.01em}
+.planstrip .pls-head .meta{font-size:11px;color:var(--ink3)}
+.pls-item{flex:1;min-width:160px;max-width:320px}
+.pls-top{display:flex;justify-content:space-between;gap:10px;font-size:12px;
+         color:var(--ink2);margin-bottom:5px}
+.pls-top b{font-variant-numeric:tabular-nums}
+.pls-reset{font-family:var(--mono);font-size:9.5px;color:var(--ink3);
+           margin-top:4px;text-align:right;font-variant-numeric:tabular-nums;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .privacy{font-size:10.5px;color:var(--side-ink3);line-height:1.55;padding:12px 6px 0}
 .privacy code{font-family:var(--mono);background:var(--side3);padding:1px 5px;
               border-radius:4px}
