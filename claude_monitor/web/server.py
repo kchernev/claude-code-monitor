@@ -855,6 +855,13 @@ def create_app(claude_dir: Optional[Path] = None, *,
         repo = (request.args.get("repo") or "all").strip()
         return jsonify(gitmon.history(repo, rng))
 
+    @app.route("/api/git/stats")
+    def api_git_stats():
+        rng = max(3600, min(request.args.get("range", type=int) or 604800,
+                            30 * 86400))
+        repo = (request.args.get("repo") or "all").strip()
+        return jsonify(gitmon.stats(repo, rng))
+
     # -- misc -------------------------------------------------------------
     @app.route("/api/reindex", methods=["POST"])
     def api_reindex():

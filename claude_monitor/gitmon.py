@@ -188,6 +188,7 @@ class GitMonitor:
         self._samples: Dict[str, List[Tuple[float, int]]] = {}  # rid -> (t, wip)
         self._toplevel: Dict[str, Tuple[Optional[str], float]] = {}
         self._commit_log: Dict[str, Tuple[float, List[dict]]] = {}
+        self._stats_log: Dict[str, Tuple[float, List[dict]]] = {}
         self._tick = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -319,6 +320,117 @@ class GitMonitor:
         out.reverse()  # oldest first
         self._commit_log[rid] = (now, out)
         return out
+
+    def _commit_stats(self, rid: str, path: str) -> List[dict]:
+        """Per-commit numstat for the last 30 days, briefly cached.
+
+        Richer than :meth:`_commits` (author + per-file churn + deletions),
+        and correspondingly heavier, so it is fetched lazily on the stats
+        endpoint rather than by the sampler.
+        """
+        now = time.time()
+        hit = self._stats_log.get(rid)
+        if hit and now - hit[0] < _COMMITS_TTL:
+            return hit[1]
+        commits: List[dict] = []
+        cur: Optional[dict] = None
+        text = run_git(path, "log", "--since=30.days", "-n", "3000",
+                       "--numstat", "--format=%x01%ct%x09%an", timeout=30)
+        for line in text.splitlines():
+            if line.startswith("\x01"):
+                parts = line[1:].split("\t", 1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    cur = {"t": int(parts[0]), "author": parts[1],
+                           "add": 0, "del": 0, "files": []}
+                    commits.append(cur)
+                else:
+                    cur = None
+            elif cur is not None and "\t" in line:
+                parts = line.split("\t", 2)
+                if len(parts) == 3:
+                    a = int(parts[0]) if parts[0].isdigit() else 0
+                    d = int(parts[1]) if parts[1].isdigit() else 0
+                    cur["add"] += a
+                    cur["del"] += d
+                    cur["files"].append((parts[2], a, d))
+        self._stats_log[rid] = (now, commits)
+        return commits
+
+    def stats(self, repo_sel: str, range_s: int) -> dict:
+        """Commit analytics across repos for the window (GitMonitor's Stats tab)."""
+        now = time.time()
+        start = now - range_s
+        repos = self._all_repos()
+        if repo_sel != "all":
+            repos = [r for r in repos if r["id"] == repo_sel]
+        multi = len(repos) > 1
+
+        gathered: List[Tuple[dict, str]] = []
+        for r in repos:
+            for c in self._commit_stats(r["id"], r["path"]):
+                if c["t"] >= start:
+                    gathered.append((c, r["name"]))
+
+        def day_start(t: float) -> float:
+            lt = time.localtime(t)
+            return time.mktime(
+                (lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+
+        per_day = range_s > 2 * 86400
+        buckets: Dict[float, dict] = {}
+        if per_day:
+            cur_t = day_start(start)
+            while cur_t <= now:
+                buckets[cur_t] = {"t": cur_t, "commits": 0, "add": 0, "del": 0}
+                lt = time.localtime(cur_t)
+                cur_t = time.mktime(
+                    (lt.tm_year, lt.tm_mon, lt.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+        else:
+            cur_t = start - start % 3600
+            while cur_t <= now:
+                buckets[cur_t] = {"t": cur_t, "commits": 0, "add": 0, "del": 0}
+                cur_t += 3600
+
+        authors: Dict[str, dict] = {}
+        files: Dict[str, dict] = {}
+        hours = [0] * 24
+        tot_add = tot_del = 0
+        days_active = set()
+        for c, repo_name in gathered:
+            key = day_start(c["t"]) if per_day else c["t"] - c["t"] % 3600
+            b = buckets.get(key)
+            if b:
+                b["commits"] += 1
+                b["add"] += c["add"]
+                b["del"] += c["del"]
+            a = authors.setdefault(c["author"], {
+                "name": c["author"], "commits": 0, "add": 0, "del": 0})
+            a["commits"] += 1
+            a["add"] += c["add"]
+            a["del"] += c["del"]
+            for fname, fa, fd in c["files"]:
+                label = f"{repo_name}/{fname}" if multi else fname
+                f = files.setdefault(label, {
+                    "file": label, "commits": 0, "add": 0, "del": 0})
+                f["commits"] += 1
+                f["add"] += fa
+                f["del"] += fd
+            hours[time.localtime(c["t"]).tm_hour] += 1
+            tot_add += c["add"]
+            tot_del += c["del"]
+            days_active.add(time.strftime("%Y-%m-%d", time.localtime(c["t"])))
+
+        return {
+            "per_day": per_day,
+            "buckets": [buckets[k] for k in sorted(buckets)],
+            "authors": sorted(authors.values(), key=lambda a: -a["add"])[:8],
+            "files": sorted(files.values(),
+                            key=lambda f: -(f["add"] + f["del"]))[:10],
+            "hours": hours,
+            "totals": {"commits": len(gathered), "add": tot_add,
+                       "del": tot_del, "files": len(files),
+                       "days": len(days_active)},
+        }
 
     # -- payloads ---------------------------------------------------------
 

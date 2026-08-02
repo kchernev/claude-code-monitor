@@ -515,17 +515,21 @@ function heatmap(cells) {
   return html;
 }
 
-/** Dual-series git chart: committed lines (violet area, steps up at commits)
-    and uncommitted WIP (green line, gaps where the monitor wasn't sampling),
-    with a diamond marker per commit on the baseline. rows share one t grid. */
-function gitChart(host, rows, commits, opts = {}) {
-  const W = host.clientWidth || 900, H = opts.height || 230;
+/** One git series per chart. mode 'committed': violet area stepping up at
+    commits, diamond marker per commit. mode 'wip': green line with gaps
+    where the monitor wasn't sampling. Each gets its own scale — on one axis
+    a 20K-line WIP flattens a 500-line committed step into invisibility. */
+function gitChart(host, rows, opts = {}) {
+  const W = host.clientWidth || 700, H = opts.height || 200;
   const pad = { t: 10, r: 8, b: 24, l: 52 };
+  const wip = opts.mode === 'wip';
+  const commits = opts.commits || [];
   host.innerHTML = '';
   if (!rows.length) { host.innerHTML = '<div class="empty">No data</div>'; return; }
-  const x0 = opts.start, x1 = opts.end;
-  const mx = Math.max(...rows.map(r => Math.max(r.wip || 0, r.committed || 0)), 10);
+  const val = r => wip ? r.wip : r.committed;
+  const mx = Math.max(...rows.map(r => val(r) || 0), 10);
   const sc = niceScale(mx);
+  const x0 = opts.start, x1 = opts.end;
   const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H }, host);
   const X = t => pad.l + (x1 === x0 ? 0 : (t - x0) / (x1 - x0)) * (W - pad.l - pad.r);
   const Y = v => H - pad.b - (v / sc.max) * (H - pad.t - pad.b);
@@ -544,44 +548,47 @@ function gitChart(host, rows, commits, opts = {}) {
     t.textContent = fmtT(tv);
   });
 
-  // committed area
-  const cd = rows.map((r, i) =>
-    `${i ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.committed).toFixed(1)}`).join('');
-  const gid = 'gc' + (++gradSeq);
-  const defs = svg('defs', {}, s);
-  const grad = svg('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
-  svg('stop', { offset: 0, 'stop-color': '#7b5cfa', 'stop-opacity': .2 }, grad);
-  svg('stop', { offset: 1, 'stop-color': '#7b5cfa', 'stop-opacity': 0 }, grad);
-  svg('path', { d: `${cd}L${X(x1)},${H - pad.b}L${X(x0)},${H - pad.b}Z`,
-                fill: `url(#${gid})` }, s);
-  svg('path', { class: 'ln', d: cd, stroke: 'var(--vio)' }, s);
-
-  // WIP line — broken where wip is null, so downtime reads as downtime
-  let wd = '', pen = false;
-  for (const r of rows) {
-    if (r.wip == null) { pen = false; continue; }
-    wd += `${pen ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.wip).toFixed(1)}`;
-    pen = true;
-  }
-  if (wd) svg('path', { class: 'ln', d: wd, stroke: '#16a34a' }, s);
-
-  // commit markers
-  const yb = H - pad.b;
-  for (const c of commits) {
-    const x = X(c.t);
-    const m = svg('path', {
-      d: `M${x} ${yb - 5}L${x + 4} ${yb}L${x} ${yb + 5}L${x - 4} ${yb}Z`,
-      fill: 'var(--vio)', stroke: 'var(--card)', 'stroke-width': 1,
-      tabindex: 0,
-    }, s);
-    bindTip(m, `${c.repo} ${c.hash}\n${c.subject.slice(0, 70)}\n+${
-      c.add.toLocaleString()} lines · ${fmtT(c.t)}`);
+  const color = wip ? '#16a34a' : 'var(--vio)';
+  if (wip) {
+    // gap-aware line: pen up wherever there is no sample
+    let wd = '', pen = false;
+    for (const r of rows) {
+      if (r.wip == null) { pen = false; continue; }
+      wd += `${pen ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.wip).toFixed(1)}`;
+      pen = true;
+    }
+    if (wd) svg('path', { class: 'ln', d: wd, stroke: color }, s);
+    else host.insertAdjacentHTML('beforeend',
+      '<div class="empty">No samples yet — the WIP line starts when the monitor starts.</div>');
+  } else {
+    const cd = rows.map((r, i) =>
+      `${i ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.committed).toFixed(1)}`).join('');
+    const gid = 'gc' + (++gradSeq);
+    const defs = svg('defs', {}, s);
+    const grad = svg('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+    svg('stop', { offset: 0, 'stop-color': '#7b5cfa', 'stop-opacity': .2 }, grad);
+    svg('stop', { offset: 1, 'stop-color': '#7b5cfa', 'stop-opacity': 0 }, grad);
+    svg('path', { d: `${cd}L${X(x1)},${H - pad.b}L${X(x0)},${H - pad.b}Z`,
+                  fill: `url(#${gid})` }, s);
+    svg('path', { class: 'ln', d: cd, stroke: color }, s);
+    const yb = H - pad.b;
+    for (const c of commits) {
+      const x = X(c.t);
+      const m = svg('path', {
+        d: `M${x} ${yb - 5}L${x + 4} ${yb}L${x} ${yb + 5}L${x - 4} ${yb}Z`,
+        fill: 'var(--vio)', stroke: 'var(--card)', 'stroke-width': 1,
+        tabindex: 0,
+      }, s);
+      bindTip(m, `${c.repo} ${c.hash}\n${c.subject.slice(0, 70)}\n+${
+        c.add.toLocaleString()} lines · ${fmtT(c.t)}`);
+    }
   }
 
   // crosshair
   const hit = svg('rect', { x: pad.l, y: pad.t, width: W - pad.l - pad.r,
     height: H - pad.t - pad.b, fill: 'transparent' }, s);
-  const cross = svg('line', { class: 'grid-line', y1: pad.t, y2: yb, opacity: 0 }, s);
+  const cross = svg('line', { class: 'grid-line', y1: pad.t, y2: H - pad.b,
+    opacity: 0 }, s);
   hit.addEventListener('mousemove', e => {
     const bb = s.getBoundingClientRect();
     const px = (e.clientX - bb.left) * (W / bb.width);
@@ -592,15 +599,64 @@ function gitChart(host, rows, commits, opts = {}) {
     }
     cross.setAttribute('x1', X(best.t)); cross.setAttribute('x2', X(best.t));
     cross.setAttribute('opacity', 1);
-    tipEl.textContent = `${fmtT(best.t)}\nWIP ${best.wip == null ? '—'
-      : best.wip.toLocaleString() + ' lines'}\ncommitted ${
-      best.committed.toLocaleString()} lines`;
+    const v = val(best);
+    tipEl.textContent = `${fmtT(best.t)}\n${wip ? 'WIP' : 'committed'} ${
+      v == null ? '—' : v.toLocaleString() + ' lines'}`;
     tipEl.classList.add('on');
     tipEl.style.left = Math.min(e.clientX + 13, innerWidth - 220) + 'px';
-    tipEl.style.top = (e.clientY - 58) + 'px';
+    tipEl.style.top = (e.clientY - 46) + 'px';
   });
   hit.addEventListener('mouseleave', () => {
     cross.setAttribute('opacity', 0); hideTip();
+  });
+}
+
+/** Diverging columns: additions up (green), deletions down (red).
+    rows: [{label, up, down, tip}] */
+function divChart(host, rows, opts = {}) {
+  const W = host.clientWidth || 700, H = opts.height || 190;
+  const pad = { t: 14, r: 6, b: 20, l: 46 };
+  host.innerHTML = '';
+  if (!rows.length || !rows.some(r => r.up || r.down)) {
+    host.innerHTML = '<div class="empty">No commits in this range</div>'; return;
+  }
+  const mUp = Math.max(...rows.map(r => r.up), 1);
+  const mDn = Math.max(...rows.map(r => r.down), 1);
+  const ih = H - pad.t - pad.b;
+  const scale = ih / (mUp + mDn);
+  const y0 = pad.t + mUp * scale;
+  const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H }, host);
+  svg('line', { class: 'grid-line', x1: pad.l, x2: W - pad.r, y1: y0, y2: y0 }, s);
+  const tUp = svg('text', { class: 'axis-t', x: 4, y: pad.t + 3 }, s);
+  tUp.textContent = '+' + tok(mUp);
+  const tDn = svg('text', { class: 'axis-t', x: 4, y: H - pad.b + 3 }, s);
+  tDn.textContent = '−' + tok(mDn);
+  const iw = (W - pad.l - pad.r) / rows.length;
+  const bw = Math.max(2, iw - 3);
+  rows.forEach((r, i) => {
+    const x = pad.l + i * iw + (iw - bw) / 2;
+    if (r.up > 0) {
+      const h = Math.max(1.5, r.up * scale);
+      bindTip(svg('rect', { x, y: y0 - h, width: bw, height: h,
+        rx: Math.min(3, bw / 3), fill: '#16a34a' }, s), () => r.tip);
+    }
+    if (r.down > 0) {
+      const h = Math.max(1.5, r.down * scale);
+      bindTip(svg('rect', { x, y: y0, width: bw, height: h,
+        rx: Math.min(3, bw / 3), fill: '#dc2626' }, s), () => r.tip);
+    }
+  });
+  const maxLabels = Math.max(2, Math.min(6, Math.floor((W - pad.l) / 90)));
+  const every = Math.max(1, Math.ceil(rows.length / maxLabels));
+  rows.forEach((r, i) => {
+    if (i % every !== 0 && i !== rows.length - 1) return;
+    if (i !== rows.length - 1 && (rows.length - 1 - i) * iw < 46) return;
+    const last = i === rows.length - 1;
+    const t = svg('text', {
+      class: 'axis-t', x: last ? W - pad.r : pad.l + i * iw + iw / 2, y: H - 5,
+      'text-anchor': last ? 'end' : i === 0 ? 'start' : 'middle',
+    }, s);
+    t.textContent = r.label || '';
   });
 }
 
@@ -787,9 +843,10 @@ const FAN_ART = `<svg viewBox="0 0 220 130" width="100%" height="100" aria-hidde
 </svg>`;
 
 views.overview = async () => {
-  const [d, live] = await Promise.all([
+  const [d, live, plan] = await Promise.all([
     api('/api/summary'),
     api('/api/live', {}, { fresh: true }),
+    api('/api/plan').catch(() => null),
   ]);
   state.summary = d;
   state.live = live;
@@ -875,6 +932,17 @@ views.overview = async () => {
           <div class="v">${tok(e.tokens.output)} <small>/ ${tok(t.tokens)}</small></div>
           <span class="delta warn">${(100 * e.output_share).toFixed(2)}% is new work</span>
         </div>
+        <div class="kpi">
+          <span class="ic" style="background:var(--green-bg);color:var(--green)">●</span>
+          <div class="k">Live right now</div>
+          <div class="v">${live.live.length} <small>session${
+            live.live.length === 1 ? '' : 's'}</small></div>
+          <span class="delta ${live.live.length ? 'up' : 'warn'}">${
+            live.live.length
+              ? `${Math.round(live.tps_now).toLocaleString()} tok/s · ${
+                  live.running_agents.length} agents · ${usd(live.burn_rate_hourly)}/hr`
+              : `${usd(live.spend_24h)} in the last 24h`}</span>
+        </div>
       </div>
 
     </div>
@@ -895,6 +963,7 @@ views.overview = async () => {
         ], rows)}</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:16px">
+        ${planCard(plan)}
         <div class="card">
           <div class="ch"><h2>Projects</h2><a class="meta" href="#/cost">Cost →</a></div>
           <div class="cb">${barList(foldTail(d.projects.map(p => ({
@@ -1381,16 +1450,43 @@ views.workflows = async () => {
 
 // ── git view ──────────────────────────────────────────────────────────
 const GIT_RANGES = [[900, '15m'], [3600, '1h'], [14400, '4h'], [86400, '24h']];
+const GIT_STAT_RANGES = [[86400, '24h'], [604800, '7d'], [2592000, '30d']];
+
+function gitSetP(patch) {
+  const p = new URLSearchParams(location.hash.split('?')[1] || '');
+  for (const [k, v] of Object.entries(patch)) {
+    v == null ? p.delete(k) : p.set(k, v);
+  }
+  history.replaceState(null, '', '#/git' + (p.toString() ? '?' + p : ''));
+  route(true);
+}
+
+const gitTabs = view => `<div class="pills" id="gitTabs" role="group" aria-label="Git view">
+  <button data-v="live" class="${view === 'live' ? 'on' : ''}">Live</button>
+  <button data-v="stats" class="${view === 'stats' ? 'on' : ''}">Stats</button></div>`;
+
+function wireGitTabs(view) {
+  $$('#gitTabs button').forEach(b => b.addEventListener('click', () => {
+    if (b.dataset.v === view) return;
+    // range means different things per tab; reset it on switch
+    gitSetP({ view: b.dataset.v === 'live' ? null : b.dataset.v, range: null });
+  }));
+}
 
 views.git = async (params) => {
-  const rng = +(params.get('range') || 3600);
+  const view = params.get('view') || 'live';
   const repo = params.get('repo') || 'all';
+  if (view === 'stats') return gitStatsView(params, repo);
+
+  const rng = +(params.get('range') || 3600);
   const [d, h] = await Promise.all([
     api('/api/git'),
     api('/api/git/history', { range: rng, repo }),
   ]);
   const t = d.totals;
   const scoped = repo !== 'all' ? d.repos.find(r => r.id === repo) : null;
+  const last = h.points[h.points.length - 1] || {};
+  const lastWip = [...h.points].reverse().find(p => p.wip != null);
 
   const cards = d.repos.map(r => {
     const st = r.stats;
@@ -1451,6 +1547,7 @@ views.git = async (params) => {
       <div><h1>Git</h1><p class="sub">${d.repos.length} repositor${
         d.repos.length === 1 ? 'y' : 'ies'} from your sessions · sampled every ${
         d.interval.toFixed(0)}s</p></div>
+      <div class="right">${gitTabs('live')}</div>
     </div>
 
     <div class="kpis">
@@ -1468,38 +1565,137 @@ views.git = async (params) => {
           <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
     </div>
 
-    <section class="blk"><div class="card">
-      <div class="ch"><h2>Code written${scoped ? ` — ${esc(scoped.name)}` : ''}</h2>
-        <div class="right">${legend([['committed (window)', 'var(--vio)'],
-          ['uncommitted WIP', '#16a34a']])}
-          <div class="pills" id="gitRange" role="group" aria-label="Chart range">
-            ${GIT_RANGES.map(([v, l]) =>
-              `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
-          </div></div></div>
-      <div class="cb"><div id="gitChart"></div>
-        <p class="mut" style="font-size:.74rem;margin:10px 0 0">◆ one diamond per
-          commit — hover for hash and subject. The WIP line starts when the
-          monitor starts; committed lines come from git history.</p></div>
-    </div></section>
+    <div class="sect" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+      <span>Code written${scoped ? ` — ${esc(scoped.name)}` : ''}</span>
+      <div class="pills" id="gitRange" role="group" aria-label="Chart range">
+        ${GIT_RANGES.map(([v, l]) =>
+          `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
+      </div>
+    </div>
+    <section class="blk" style="display:grid;margin-top:0;
+        grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">
+      <div class="card">
+        <div class="ch"><h2>Committed</h2>
+          <span class="meta">${(last.committed || 0).toLocaleString()} lines · ${
+            h.commits.length} commit${h.commits.length === 1 ? '' : 's'} in window
+            · ◆ hover for detail</span></div>
+        <div class="cb"><div id="gitCommitted"></div></div>
+      </div>
+      <div class="card">
+        <div class="ch"><h2>Uncommitted WIP</h2>
+          <span class="meta">${lastWip ? `${lastWip.wip.toLocaleString()} lines now`
+            : 'sampling starts with the monitor'}</span></div>
+        <div class="cb"><div id="gitWip"></div></div>
+      </div>
+    </section>
 
     <div class="gitgrid">${cards ||
-      '<div class="empty"><b>No repositories found</b>No session in this window ran inside a git repository.</div>'}</div>`;
+      '<div class="empty"><b>No repositories found</b>No session ran inside a git repository.</div>'}</div>`;
 
   hydrateTips($('#view'));
-  gitChart($('#gitChart'), h.points, h.commits,
-           { start: h.start, end: h.end, height: 230 });
-  const setP = (k, v, def) => {
-    const p = new URLSearchParams(location.hash.split('?')[1] || '');
-    v === def ? p.delete(k) : p.set(k, v);
-    history.replaceState(null, '', '#/git' + (p.toString() ? '?' + p : ''));
-    route(true);
-  };
+  wireGitTabs('live');
+  gitChart($('#gitCommitted'), h.points,
+           { mode: 'committed', commits: h.commits,
+             start: h.start, end: h.end, height: 200 });
+  gitChart($('#gitWip'), h.points,
+           { mode: 'wip', start: h.start, end: h.end, height: 200 });
   $$('#gitRange button').forEach(b =>
-    b.addEventListener('click', () => setP('range', b.dataset.r, '3600')));
+    b.addEventListener('click', () =>
+      gitSetP({ range: b.dataset.r === '3600' ? null : b.dataset.r })));
   $$('.gcard .scope').forEach(b =>
     b.addEventListener('click', () =>
-      setP('repo', b.dataset.repo === repo ? 'all' : b.dataset.repo, 'all')));
+      gitSetP({ repo: b.dataset.repo === repo ? null : b.dataset.repo })));
 };
+
+async function gitStatsView(params, repo) {
+  const rng = +(params.get('range') || 604800);
+  const [d, st] = await Promise.all([
+    api('/api/git'),
+    api('/api/git/stats', { range: rng, repo }),
+  ]);
+  const scoped = repo !== 'all' ? d.repos.find(r => r.id === repo) : null;
+  const t = st.totals;
+
+  $('#view').innerHTML = `
+    <div class="hd">
+      <div><h1>Git</h1><p class="sub">Commit analytics${scoped
+        ? ` — ${esc(scoped.name)}` : ` across ${d.repos.length} repos`} · last ${
+        (GIT_STAT_RANGES.find(([v]) => v === rng) || [0, '?'])[1]}</p></div>
+      <div class="right">
+        ${scoped ? `<a class="btn" href="#/git?view=stats">All repos ✕</a>` : ''}
+        <div class="pills" id="gitRange" role="group" aria-label="Stats range">
+          ${GIT_STAT_RANGES.map(([v, l]) =>
+            `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
+        </div>
+        ${gitTabs('stats')}
+      </div>
+    </div>
+
+    <div class="kpis">
+      ${[[t.commits.toLocaleString(), 'Commits', `${t.days} active day${
+            t.days === 1 ? '' : 's'}`],
+         [`<span class="gadd">+${tok(t.add)}</span>`, 'Lines added', ''],
+         [`<span class="gdel">−${tok(t.del)}</span>`, 'Lines removed', ''],
+         [t.files.toLocaleString(), 'Files touched', 'in this range']]
+        .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
+          <div class="v">${v}</div>
+          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
+    </div>
+
+    <section class="blk" style="display:grid;
+        grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">
+      <div class="card">
+        <div class="ch"><h2>Commits per ${st.per_day ? 'day' : 'hour'}</h2></div>
+        <div class="cb"><div id="stCommits"></div></div>
+      </div>
+      <div class="card">
+        <div class="ch"><h2>Lines added / removed</h2>
+          ${legend([['added', '#16a34a'], ['removed', '#dc2626']])}</div>
+        <div class="cb"><div id="stLines"></div></div>
+      </div>
+    </section>
+
+    <section class="blk grid cols3">
+      <div class="card"><div class="ch"><h2>By author</h2></div>
+        <div class="cb">${barList(st.authors.map(a => ({
+          label: a.name, value: a.add + a.del,
+          text: `+${tok(a.add)} −${tok(a.del)}`,
+          sub: `${a.commits} commit${a.commits === 1 ? '' : 's'}`,
+          tip: `${a.commits} commits · +${a.add.toLocaleString()} −${
+            a.del.toLocaleString()} lines`,
+        })))}</div></div>
+      <div class="card"><div class="ch"><h2>Busiest files</h2></div>
+        <div class="cb">${barList(st.files.map(f => ({
+          label: f.file.split('/').slice(-2).join('/'), value: f.add + f.del,
+          text: `+${tok(f.add)} −${tok(f.del)}`,
+          sub: `${f.commits}×`, tip: f.file,
+        })))}</div></div>
+      <div class="card"><div class="ch"><h2>Commits by hour of day</h2></div>
+        <div class="cb"><div id="stHours"></div></div></div>
+    </section>`;
+
+  hydrateTips($('#view'));
+  wireGitTabs('stats');
+  const bl = st.buckets;
+  const blab = b => st.per_day
+    ? new Date(b.t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    : new Date(b.t * 1000).toLocaleTimeString(undefined, { hour: 'numeric' });
+  colChart($('#stCommits'), bl.map(b => ({
+    v: b.commits, label: blab(b),
+    tip: `${blab(b)}\n${b.commits} commit${b.commits === 1 ? '' : 's'}`,
+  })), { height: 190, fmt: v => Math.round(v) });
+  divChart($('#stLines'), bl.map(b => ({
+    label: blab(b), up: b.add, down: b.del,
+    tip: `${blab(b)}\n+${b.add.toLocaleString()} −${b.del.toLocaleString()} lines`,
+  })), { height: 190 });
+  colChart($('#stHours'), st.hours.map((n, hr) => ({
+    v: n, label: hr % 3 === 0 ? String(hr) : '',
+    tip: `${hr}:00–${hr + 1}:00\n${n} commit${n === 1 ? '' : 's'}`,
+  })), { height: 170, fmt: v => Math.round(v), color: 'var(--gold)' });
+  $$('#gitRange button').forEach(b =>
+    b.addEventListener('click', () =>
+      gitSetP({ range: b.dataset.r === '604800' ? null : b.dataset.r })));
+}
 
 // severity → color for plan-limit bars (bright variants; text uses AA inks)
 const limitColor = l =>
