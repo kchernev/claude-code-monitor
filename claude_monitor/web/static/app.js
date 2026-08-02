@@ -118,6 +118,12 @@ async function api(path, params, opts = {}) {
   if (!r.ok) throw new Error(`${r.status} ${path}`);
   const data = await r.json();
   apiCache.set(key, { at: Date.now(), data });
+  // Evict once past a sane size — every distinct URL otherwise lives in the
+  // map (and holds its whole response) for the life of the tab.
+  if (apiCache.size > 64) {
+    const cutoff = Date.now() - API_TTL;
+    for (const [k, v] of apiCache) if (v.at < cutoff) apiCache.delete(k);
+  }
   return data;
 }
 
@@ -142,7 +148,10 @@ function niceScale(max, targetTicks = 4) {
   return { max: top, ticks };
 }
 function smoothPath(pts, t = 7) {
-  if (pts.length < 2) return '';
+  if (!pts.length) return '';
+  // A single point still needs a moveto — callers append "L…Z" to close the
+  // area fill, and a path that starts with L is silently invalid SVG.
+  if (pts.length === 1) return `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
   let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
   for (let i = 0; i < pts.length - 1; i++) {
     const p0 = pts[Math.max(i - 1, 0)], p1 = pts[i], p2 = pts[i + 1];
@@ -959,7 +968,8 @@ views.session = async (params, sid) => {
         <div class="ch"><h2>Models used</h2>
           <span class="meta">${s.models.length}</span></div>
         <div class="cb">${barList(
-          s.models.map((m, i) => ({ label: m.label, value: m.cost, color: SERIES[i],
+          s.models.map((m, i) => ({ label: m.label, value: m.cost,
+            color: SERIES[i % SERIES.length],
             text: usd(m.cost), sub: `${m.calls} calls`, tip: `${tok(m.tokens)} tokens` })))}
         </div></div>
     </section>

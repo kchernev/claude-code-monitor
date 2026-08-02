@@ -64,7 +64,8 @@ class Dashboard:
     ):
         self.corpus = corpus
         self.sessions = sessions
-        self.interval = interval
+        # Floor, not trust: --interval 0 would busy-loop re-parsing the corpus.
+        self.interval = max(0.5, interval)
         self.window_hours = window_hours
         self.live_only = live_only
         self.monitor = ResourceMonitor()
@@ -82,6 +83,17 @@ class Dashboard:
         self.ticks += 1
 
         now = time.time()
+        # Drop velocity state for sessions that are no longer live; without
+        # this the dicts grow by one entry per session ever seen live, for the
+        # whole life of the dashboard.
+        live_ids = {s.session_id for s in self.sessions if s.is_live}
+        for sid in list(self._pulse):
+            if sid not in live_ids:
+                del self._pulse[sid]
+        for sid in list(self._prev_output):
+            if sid not in live_ids:
+                del self._prev_output[sid]
+
         for s in self.sessions:
             if not s.is_live:
                 continue

@@ -23,7 +23,11 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from .models import AgentRun, ApiCall, ModelStat, Session, Usage, _utc
 
-CACHE_VERSION = 8
+# Bump whenever parse output changes shape *or meaning* — cached entries carry
+# no parser version of their own, so a stale format would silently disagree
+# with freshly parsed sessions. v9: injected-prefix screening for list-form
+# user records.
+CACHE_VERSION = 9
 
 # Unique-per-record fallback identity. Never reuse ``id(rec)`` here: CPython
 # recycles addresses as records are garbage-collected between iterations, so
@@ -199,9 +203,17 @@ def _is_human_turn(rec: dict) -> bool:
     if isinstance(content, str):
         return not content.lstrip().startswith(_INJECTED_PREFIXES)
     if isinstance(content, list):
-        return not any(
+        if any(
             isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-        )
+        ):
+            return False
+        # Older transcripts carry no origin.kind, so screen list-form content
+        # by its first text block the same way string content is screened.
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                text = (b.get("text") or "").lstrip()
+                return not text.startswith(_INJECTED_PREFIXES)
+        return True
     return False
 
 
@@ -231,9 +243,10 @@ def _read_agent_meta(path: Path) -> dict:
     Claude Code records the agent's type, description and spawn depth here,
     which is more reliable than inferring them from the parent's tool call.
     """
-    meta_path = path.with_suffix("").with_suffix(".meta.json")
-    if not meta_path.exists():
-        meta_path = path.parent / (path.stem + ".meta.json")
+    # Built from the stem, not with_suffix(): with_suffix() cuts at the last
+    # dot, so an agent id containing one would resolve to a *different* agent's
+    # sidecar and silently pick up its type and description.
+    meta_path = path.parent / (path.stem + ".meta.json")
     try:
         with open(meta_path) as fh:
             data = json.load(fh)

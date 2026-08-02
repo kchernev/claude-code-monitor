@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request
 
 from .. import analytics, pricing
 from ..models import AgentRun, Session, _distill_topic
@@ -826,10 +826,17 @@ def create_app(claude_dir: Optional[Path] = None, *,
         return jsonify({"ok": True, "sessions": len(sessions)})
 
     @app.after_request
-    def no_store(resp):
+    def response_headers(resp):
         # The UI polls; stale API responses would freeze the live view.
         if request.path.startswith("/api/"):
             resp.headers["Cache-Control"] = "no-store"
+        # Belt-and-braces alongside the origin guard: never sniff a response
+        # into a scriptable type, never render inside another site's frame
+        # (the reindex button would be a clickjacking target), and never leak
+        # local URLs out through Referer.
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
         return resp
 
     return app

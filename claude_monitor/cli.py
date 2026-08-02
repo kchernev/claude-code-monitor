@@ -1026,12 +1026,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # Resolve argv up front: the re-parse below must see the same arguments.
+    # `argv or []` here would silently drop global flags from a bare
+    # `cmon --no-color`, because argv is None when invoked from the shell.
+    if argv is None:
+        argv = sys.argv[1:]
     parser = build_parser()
     args = parser.parse_args(argv)
 
     # Bare `cmon` launches the dashboard.
     if not getattr(args, "command", None):
-        args = parser.parse_args((argv or []) + ["live"])
+        args = parser.parse_args(list(argv) + ["live"])
 
     console = Console(no_color=args.no_color, soft_wrap=False)
     # Subcommands that don't take the filter flags still need the attributes.
