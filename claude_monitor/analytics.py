@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Tuple
+from datetime import date, datetime, time as dt_time, timedelta, timezone
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from . import pricing
 from .models import AgentRun, Session, Usage
@@ -99,14 +99,69 @@ def by_model(sessions: Iterable[Session]) -> List[Bucket]:
 
 
 def by_day(sessions: Iterable[Session], days: int = 30) -> List[Tuple[date, Bucket]]:
-    """Daily totals for the trailing ``days``, oldest first, gaps filled."""
+    """Daily totals for the trailing ``days``, oldest first, gaps filled.
+
+    Cost is attributed to the day each API call actually happened, from the
+    per-call timeline — never lumped onto the session's start date. Lumping
+    put a week-long session's whole bill on day one and dropped sessions that
+    started before the window entirely, which is why the daily chart used to
+    disagree with the window total. Agents keep no timeline, so their totals
+    are apportioned across their runtime by day overlap; an agent's calls and
+    run-count land on its start day.
+    """
     out: Dict[date, Bucket] = {}
+    active: Dict[date, Set[str]] = defaultdict(set)
+
+    def bucket(d: date) -> Bucket:
+        b = out.get(d)
+        if b is None:
+            b = out[d] = Bucket(key=d.isoformat())
+        return b
+
     for s in sessions:
-        if not s.started:
-            continue
-        d = s.started.astimezone(timezone.utc).date()
-        b = out.setdefault(d, Bucket(key=d.isoformat()))
-        _fold(b, s)
+        for ts, out_tok, ctx, cost, uncached in s.timeline:
+            d = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+            b = bucket(d)
+            b.cost += cost
+            b.uncached_cost += uncached
+            b.api_calls += 1
+            b.usage.input_tokens += ctx
+            b.usage.output_tokens += out_tok
+            active[d].add(s.session_id)
+
+        for a in s.agents:
+            if not a.started:
+                continue
+            t0 = a.started.astimezone(timezone.utc)
+            t1 = (a.ended or a.started).astimezone(timezone.utc)
+            b0 = bucket(t0.date())
+            b0.agents += 1
+            b0.api_calls += a.api_calls
+            span = (t1 - t0).total_seconds()
+            if span <= 0:
+                b0.cost += a.cost
+                b0.uncached_cost += a.uncached_cost
+                b0.usage.input_tokens += a.usage.total_input
+                b0.usage.output_tokens += a.usage.output_tokens
+                active[t0.date()].add(s.session_id)
+                continue
+            d = t0.date()
+            while d <= t1.date():
+                day_lo = datetime.combine(d, dt_time.min, tzinfo=timezone.utc)
+                day_hi = day_lo + timedelta(days=1)
+                ov = (min(t1, day_hi) - max(t0, day_lo)).total_seconds()
+                if ov > 0:
+                    frac = ov / span
+                    b = bucket(d)
+                    b.cost += a.cost * frac
+                    b.uncached_cost += a.uncached_cost * frac
+                    b.usage.input_tokens += int(a.usage.total_input * frac)
+                    b.usage.output_tokens += int(a.usage.output_tokens * frac)
+                    active[d].add(s.session_id)
+                d += timedelta(days=1)
+
+    for d, ids in active.items():
+        out[d].sessions = len(ids)
 
     if not out:
         return []
@@ -129,6 +184,22 @@ def all_agents(sessions: Iterable[Session]) -> List[AgentRun]:
         reverse=True,
     )
     return runs
+
+
+def pin_running(
+    runs: List[AgentRun], live_session_ids: Set[str]
+) -> List[AgentRun]:
+    """Stable-partition agent runs so the ones running right now come first.
+
+    Whatever a list is sorted by — cost, recency — an agent that is actively
+    working belongs at the top, not wherever its sort key happens to land.
+    The sort is stable, so each partition keeps the caller's ordering.
+    """
+    return sorted(
+        runs,
+        key=lambda a: a.state(parent_live=a.session_id in live_session_ids)
+        != "running",
+    )
 
 
 @dataclass
@@ -387,7 +458,7 @@ def recent_rates(
     lo = now - window_s
     cost = out = 0.0
     for s in sessions:
-        for ts, o, _ctx, c in reversed(s.timeline):
+        for ts, o, _ctx, c, _unc in reversed(s.timeline):
             if ts < lo:
                 break
             cost += c
@@ -411,21 +482,21 @@ def velocity_series(sess: Session, bucket_s: float = 30.0) -> List[Tuple[float, 
     if len(sess.timeline) < 2:
         return []
     buckets: Dict[int, float] = defaultdict(float)
-    for ts, out_tokens, _ctx, _cost in sess.timeline:
+    for ts, out_tokens, _ctx, _cost, _unc in sess.timeline:
         buckets[int(ts // bucket_s)] += out_tokens
     return [(k * bucket_s, v / bucket_s) for k, v in sorted(buckets.items())]
 
 
 def context_series(sess: Session) -> List[Tuple[float, int]]:
     """Context size per API call: ``[(epoch, context_tokens), ...]``."""
-    return [(ts, ctx) for ts, _out, ctx, _cost in sess.timeline]
+    return [(ts, ctx) for ts, _out, ctx, _cost, _unc in sess.timeline]
 
 
 def cost_series(sess: Session) -> List[Tuple[float, float]]:
     """Cumulative spend over the session: ``[(epoch, usd_so_far), ...]``."""
     running = 0.0
     out = []
-    for ts, _o, _c, cost in sess.timeline:
+    for ts, _o, _c, cost, _unc in sess.timeline:
         running += cost
         out.append((ts, running))
     return out

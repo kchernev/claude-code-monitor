@@ -700,7 +700,14 @@ views.overview = async () => {
   const cumSeries = [];
   let run = 0;
   for (const v of dailyCost) { run += v; cumSeries.push(run); }
+  // Window numbers come from the same per-day series the chart draws, so the
+  // headline and the chart always agree. totals (t.*) counts whole sessions
+  // active in the window — a straddling session's whole bill — which is a
+  // different (bigger) number; it still backs the counts, not the spend.
   const windowSpend = dailyCost.reduce((a, b) => a + b, 0);
+  const windowUncached = daily.reduce((a, r) => a + (r.uncached || 0), 0);
+  const winSaved = Math.max(0, windowUncached - windowSpend);
+  const winSavedPct = windowUncached ? 100 * winSaved / windowUncached : 0;
 
   const sessData = await api('/api/sessions', { sort: 'recent', limit: 8 });
   const rows = sessData.sessions.map(s => {
@@ -739,8 +746,8 @@ views.overview = async () => {
         <div class="kpi">
           <span class="ic" style="background:color-mix(in srgb,var(--vio) 12%,transparent);color:var(--vio-text)">$</span>
           <div class="k">Actual spend</div>
-          <div class="v">${usd(t.cost)}</div>
-          <span class="delta up">↓ ${t.savings_pct.toFixed(0)}% vs uncached list</span>
+          <div class="v">${usd(windowSpend)}</div>
+          <span class="delta up">↓ ${winSavedPct.toFixed(0)}% vs uncached list</span>
           <span class="spk">${sparkSVG(dailyCost, 86, 30, '#16a34a')}</span>
         </div>
         <div class="kpi">
@@ -788,8 +795,8 @@ views.overview = async () => {
           <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px;
             display:flex;justify-content:space-between;font-size:12.5px">
             <span class="mut">Cache saved in this window</span>
-            <b style="color:var(--green)" class="num">${usd(t.savings)}
-              (${t.savings_pct.toFixed(0)}%)</b></div>
+            <b style="color:var(--green)" class="num">${usd(winSaved)}
+              (${winSavedPct.toFixed(0)}%)</b></div>
           </div>
         </div>
         <div class="card" style="flex:1">
@@ -937,7 +944,8 @@ views.session = async (params, sid) => {
       <div class="card"><div class="ch"><h2>Spend / hour</h2>
         <span class="meta">24h · incl. agents</span></div>
         <div class="cb"><div id="hrCost"></div></div></div>` : ''}
-      <div class="card"><div class="ch"><h2>Cumulative spend</h2></div>
+      <div class="card"><div class="ch"><h2>Cumulative spend</h2>
+        <span class="meta">incl. agents</span></div>
         <div class="cb"><div id="costChart"></div></div></div>
     </section>
 
@@ -1018,8 +1026,13 @@ views.session = async (params, sid) => {
     height: 150, color: '#e8930c', hex: '#e8930c',
     label: p => `${new Date(p.t * 1000).toLocaleString()}\ncontext ${tok(p.v)} tokens`,
   });
+  // spend_curve folds agent costs in, so the line ends at the Total cost KPI
+  // instead of at the main-thread subtotal.
   let run = 0;
-  lineChart($('#costChart'), tl.map(p => ({ t: p.t, v: (run += p.cost) })), {
+  const curve = (s.spend_curve && s.spend_curve.length)
+    ? s.spend_curve
+    : tl.map(p => ({ t: p.t, v: (run += p.cost) }));
+  lineChart($('#costChart'), curve, {
     height: 150, fmt: usdAxis,
     label: p => `${new Date(p.t * 1000).toLocaleString()}\n${usd(p.v)} spent`,
   });
@@ -1243,16 +1256,35 @@ const limitColor = l =>
   (l.severity !== 'normal' || l.percent >= 90) ? 'var(--red-bright)'
   : l.percent >= 70 ? 'var(--amber-bright)' : 'var(--green-bright)';
 
+/** {rel, abs} for a limit's reset — "2h 09m" + the local clock time it lands.
+    Sub-day resets show the time ("15:10"); longer ones add the weekday
+    ("Fri 08:00"), since "in 4d 18h" alone makes you do calendar math. */
+const resetInfo = l => {
+  if (!l.resets_in || l.resets_in <= 0) return null;
+  const at = l.resets_at ? new Date(l.resets_at) : null;
+  let abs = '';
+  if (at && !isNaN(at)) {
+    abs = l.resets_in < 86400
+      ? at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+      : at.toLocaleString(undefined,
+          { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+  return { rel: dur(l.resets_in), abs };
+};
+
 function planCard(plan) {
   if (!plan || plan.available === false) return '';
-  const rows = (plan.limits || []).map(l => `
+  const rows = (plan.limits || []).map(l => {
+    const r = resetInfo(l);
+    return `
     <div class="plrow">
       <div class="plhead"><span>${esc(l.label)}</span>
         <span class="num mut">${l.percent}% used${
-          l.resets_in ? ` · resets in ${dur(l.resets_in)}` : ''}</span></div>
+          r ? ` · resets in ${r.rel}${r.abs ? ` (${esc(r.abs)})` : ''}` : ''}</span></div>
       <div class="track" style="height:7px"><div class="fill" style="width:${
         Math.min(100, l.percent)}%;background:${limitColor(l)}"></div></div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   const x = plan.extra;
   return `<div class="card">
     <div class="ch"><h2>Plan limits</h2>
@@ -1280,6 +1312,13 @@ views.cost = async () => {
   ]);
   state.summary = d;
   const t = d.totals, c = d.cache, e = d.economics;
+  // Spend within the window, from the same daily series the chart draws —
+  // whole-session totals disagree with it whenever a session straddles the
+  // window edge.
+  const wSpend = d.daily.reduce((a, r) => a + r.cost, 0);
+  const wUncached = d.daily.reduce((a, r) => a + (r.uncached || 0), 0);
+  const wSaved = Math.max(0, wUncached - wSpend);
+  const wSavedPct = wUncached ? 100 * wSaved / wUncached : 0;
   const typeRows = [
     ['Cache read', 'cache_read', SERIES[0]],
     ['Cache write · 5m', 'cache_write_5m', SERIES[1]],
@@ -1294,12 +1333,12 @@ views.cost = async () => {
       <div class="right">${windowPicker()}</div></div>
 
     <div class="kpis">
-      ${[[usd(t.cost), 'Actual', 'with prompt caching', 'up',
-          `↓ ${t.savings_pct.toFixed(0)}% vs uncached`],
-         [usd(t.uncached_cost), 'Without caching', 'same tokens, full input rate',
-          'bad', `${(t.uncached_cost / (t.cost || 1)).toFixed(1)}× more`],
-         [usd(t.savings), 'Saved', 'by prompt caching', 'up',
-          `${t.savings_pct.toFixed(0)}% of counterfactual`],
+      ${[[usd(wSpend), 'Actual', 'with prompt caching', 'up',
+          `↓ ${wSavedPct.toFixed(0)}% vs uncached`],
+         [usd(wUncached), 'Without caching', 'same tokens, full input rate',
+          'bad', `${(wUncached / (wSpend || 1)).toFixed(1)}× more`],
+         [usd(wSaved), 'Saved', 'by prompt caching', 'up',
+          `${wSavedPct.toFixed(0)}% of counterfactual`],
          [usd(e.effective_output_rate), 'Real cost / 1M output', `list is ${
           usd(e.list_output_rate)}`, 'bad', `${e.multiple_of_list.toFixed(0)}× list`],
          [pct(c.hit_rate), 'Cache hit rate', `${tok(c.cache_read)} tokens read`,
@@ -1313,8 +1352,8 @@ views.cost = async () => {
       ? ' style="display:grid;grid-template-columns:1fr minmax(320px,400px);gap:16px"'
       : ''}>
       <div class="card">
-        <div class="ch"><h2>Daily spend</h2><span class="meta">${usd(
-          d.daily.reduce((a, r) => a + r.cost, 0))} total</span></div>
+        <div class="ch"><h2>Daily spend</h2><span class="meta">${usd(wSpend)}
+          total</span></div>
         <div class="cb"><div id="dailyChart"></div></div></div>
       ${planCard(plan)}
     </section>
@@ -1519,15 +1558,19 @@ function paintPlan(p) {
   $('#planName').textContent = p.plan + ' plan';
   $('#planAge').textContent = p.source === 'live' ? 'live'
     : p.age_s != null ? dur(p.age_s) + ' ago' : '';
-  $('#planRows').innerHTML = (p.limits || []).map(l => `
+  $('#planRows').innerHTML = (p.limits || []).map(l => {
+    const r = resetInfo(l);
+    return `
     <div class="pl" title="${esc(l.label)} — ${l.percent}% used${
-      l.resets_in ? `, resets in ${dur(l.resets_in)}` : ''}">
+      r ? `, resets in ${r.rel}${r.abs ? ` (${r.abs})` : ''}` : ''}">
       <span class="plk">${esc(l.label.replace(' · all models', ' all')
         .replace('Week · ', 'Wk '))}</span>
       <span class="plt"><i style="width:${Math.min(100, l.percent)}%;background:${
         sev(l)}"></i></span>
       <span class="plv">${l.percent}%</span>
-    </div>`).join('');
+      ${r ? `<span class="plr">↻ ${r.rel}${r.abs ? ` · ${esc(r.abs)}` : ''}</span>` : ''}
+    </div>`;
+  }).join('');
   box.hidden = false;
 }
 async function fetchPlan() {

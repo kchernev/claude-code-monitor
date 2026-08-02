@@ -211,6 +211,9 @@ def cmd_agents(console: Console, args) -> int:
 
     if args.type:
         runs = [a for a in runs if args.type.lower() in (a.subagent_type or "").lower()]
+    # Running agents first, before the cut, so active work is always visible.
+    live_ids = {s.session_id for s in sessions if s.is_live}
+    runs = analytics.pin_running(runs, live_ids)
     runs_shown = runs[: args.limit]
 
     if args.json:
@@ -657,7 +660,12 @@ def cmd_show(console: Console, args) -> int:
         at.add_column("TOK/S", justify="right")
         at.add_column("COST", justify="right")
         glyphs = {"done": ("✓", C_LIVE), "running": ("▶", C_COST), "stopped": ("⊘", C_DIM)}
-        for a in sorted(sess.agents, key=lambda x: -x.cost):
+        # Running first, then by cost.
+        ordered = sorted(
+            sess.agents,
+            key=lambda x: (x.state(parent_live=sess.is_live) != "running", -x.cost),
+        )
+        for a in ordered:
             ch, st = glyphs[a.state(parent_live=sess.is_live)]
             at.add_row(
                 Text(ch, style=st),

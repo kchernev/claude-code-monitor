@@ -512,6 +512,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
             {
                 "date": d.isoformat(),
                 "cost": b.cost,
+                "uncached": b.uncached_cost,
                 "tokens": b.usage.total,
                 "sessions": b.sessions,
                 "agents": b.agents,
@@ -522,7 +523,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
         # Activity heatmap: spend by weekday x hour, from API-call timestamps.
         heat: Dict[tuple, float] = defaultdict(float)
         for s in sessions:
-            for ts, _out, _ctx, cost in s.timeline:
+            for ts, _out, _ctx, cost, _unc in s.timeline:
                 dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
                 heat[(dt.weekday(), dt.hour)] += cost
         heatmap = [
@@ -584,15 +585,17 @@ def create_app(claude_dir: Optional[Path] = None, *,
             for s in live for a in s.agents
             if a.state(parent_live=True) == "running"
         ]
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-        window = [s for s in sessions if s.ended and s.ended >= cutoff]
+        # Exact spend within the trailing 24h from call timestamps — summing
+        # whole sessions that merely *ended* in the window counts work done
+        # days ago whenever a long session is still open.
+        spend_24h = analytics.recent_rates(sessions, 86400.0)[0] * 24.0
         return jsonify({
             "now": datetime.now(timezone.utc).isoformat(),
             "live": [session_brief(s) for s in live],
             "running_agents": running_agents,
             "burn_rate_hourly": burn,
             "tps_now": tps_now,
-            "spend_24h": analytics.totals(window).cost,
+            "spend_24h": spend_24h,
             "system": system_snapshot(),
             "generation": store.generation,
             "age_s": max(0.0, time.time() - store.last_refresh),
@@ -649,7 +652,13 @@ def create_app(claude_dir: Optional[Path] = None, *,
             ],
             "agents": [
                 agent_json(a, parent_live=s.is_live, project=s.project)
-                for a in sorted(s.agents, key=lambda x: -x.cost)
+                # Running first, then by cost.
+                for a in sorted(
+                    s.agents,
+                    key=lambda x: (
+                        x.state(parent_live=s.is_live) != "running", -x.cost
+                    ),
+                )
             ],
             "prompts": s.prompts,
             "files": [
@@ -658,6 +667,10 @@ def create_app(claude_dir: Optional[Path] = None, *,
             ],
             # Downsampled so a 4,000-call session still renders instantly.
             "timeline": _downsample(s.timeline, 600),
+            # Separate series for the cumulative chart: the timeline is main
+            # thread only, so on an agent-heavy session a cumulative sum of it
+            # tops out far below the "Total cost" KPI. This one folds agents in.
+            "spend_curve": _spend_curve(s),
             "hourly": _hourly_buckets(s),
         })
         return jsonify(base)
@@ -728,6 +741,10 @@ def create_app(claude_dir: Optional[Path] = None, *,
             "duration": lambda r: r["duration_s"],
         }
         rows.sort(key=keyfns.get(sort, keyfns["recent"]), reverse=True)
+        # Running agents pinned first regardless of sort — active work should
+        # never be buried under expensive history. Stable, so each partition
+        # keeps the chosen order.
+        rows.sort(key=lambda r: r["state"] != "running")
         limit = max(1, min(request.args.get("limit", type=int) or 300, 3000))
 
         costs = sorted(r["cost"] for r in rows)
@@ -957,6 +974,37 @@ def _extract_tool_calls(projects_dir: Path, s: Session, tool: str,
             "truncated": total > limit}
 
 
+def _spend_curve(s: Session, target: int = 500) -> List[dict]:
+    """Cumulative spend over the session including agents: ``[{t, v}, ...]``.
+
+    Main-thread calls are exact events; each agent's cost is spread uniformly
+    across its runtime as a handful of synthetic events, the same apportioning
+    the hourly buckets use. The curve therefore ends at total_cost, matching
+    the KPI above it (minus agents that never wrote a timestamp).
+    """
+    events: List[tuple] = [(ts, c) for ts, _o, _ctx, c, _u in s.timeline]
+    for a in s.agents:
+        if not a.started or a.cost <= 0:
+            continue
+        t0 = a.started.timestamp()
+        t1 = (a.ended or a.started).timestamp()
+        span = max(1.0, t1 - t0)
+        k = max(1, min(32, int(span // 600) + 1))
+        for i in range(k):
+            events.append((t0 + (i + 0.5) * span / k, a.cost / k))
+    if not events:
+        return []
+    events.sort()
+    step = max(1, -(-len(events) // target))  # ceil division
+    out: List[dict] = []
+    run = 0.0
+    for i, (ts, c) in enumerate(events):
+        run += c
+        if i % step == 0 or i == len(events) - 1:
+            out.append({"t": ts, "v": round(run, 6)})
+    return out
+
+
 def _hourly_buckets(s: Session) -> List[dict]:
     """24 one-hour buckets of spend and output tokens, ending at the session's
     last activity (for a live session that is literally the last 24h).
@@ -977,7 +1025,7 @@ def _hourly_buckets(s: Session) -> List[dict]:
     start = anchor - 23 * 3600
     buckets = [{"t": start + i * 3600, "cost": 0.0, "out": 0} for i in range(24)]
 
-    for ts, out, _ctx, cost in s.timeline:
+    for ts, out, _ctx, cost, _unc in s.timeline:
         i = int((ts - start) // 3600)
         if 0 <= i < 24:
             buckets[i]["cost"] += cost
@@ -1016,7 +1064,7 @@ def _downsample(timeline: List[tuple], target: int) -> List[dict]:
     if len(timeline) <= target:
         return [
             {"t": ts, "out": out, "ctx": ctx, "cost": cost}
-            for ts, out, ctx, cost in timeline
+            for ts, out, ctx, cost, _unc in timeline
         ]
     step = len(timeline) / target
     out: List[dict] = []

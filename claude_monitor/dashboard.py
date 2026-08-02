@@ -136,9 +136,12 @@ class Dashboard:
 
     def header(self) -> Panel:
         live = self.live_sessions()
-        window = self.window_sessions()
-        wt = analytics.totals(window)
         sysinfo = system_snapshot()
+        # Spend from call timestamps inside the window — totals() over the
+        # window's *sessions* would count a straddling session's whole bill.
+        window_s = self.window_hours * 3600.0
+        window_cost = analytics.recent_rates(self.sessions, window_s)[0] \
+            * self.window_hours
 
         # Trailing-window rate, not a lifetime average: what these sessions are
         # costing right now, which is the same number the web UI reports.
@@ -162,7 +165,8 @@ class Dashboard:
         grid.add_row(
             cell("LIVE SESSIONS", f"{len(live)}", C_LIVE if live else C_DIM),
             cell("SUBAGENTS", f"{agent_ct}", C_AGENT),
-            cell(f"SPEND / {int(self.window_hours)}H", pricing.fmt_usd(wt.cost), C_COST),
+            cell(f"SPEND / {int(self.window_hours)}H",
+                 pricing.fmt_usd(window_cost), C_COST),
             cell("BURN RATE", f"{pricing.fmt_usd(burn)}/hr", C_COST),
             cell("OUTPUT", f"{live_tps:,.0f} tok/s", C_TEAL),
             cell("HOST", f"{cpu:.0f}% cpu · {mem_pct:.0f}% mem", C_PRIMARY),
@@ -246,7 +250,11 @@ class Dashboard:
 
     def agents_panel(self) -> Panel:
         live_ids = {s.session_id for s in self.live_sessions()}
-        runs = analytics.all_agents(self.window_sessions())[:12]
+        # Running agents first — pinned before the cut, or an active agent
+        # older than the twelve newest would drop out of the panel entirely.
+        runs = analytics.pin_running(
+            analytics.all_agents(self.window_sessions()), live_ids
+        )[:12]
 
         t = Table(box=box.SIMPLE, expand=True, show_edge=False,
                   header_style=f"bold {C_DIM}", padding=(0, 1))

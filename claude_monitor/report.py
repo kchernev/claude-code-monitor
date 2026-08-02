@@ -349,7 +349,8 @@ def build_html(sessions: List[Session], *, window_days: int = 30) -> str:
         A(_section(
             f"03 — Last {window_days} days",
             "Daily spend",
-            "One column per day, by session start date.",
+            "One column per day. Cost is attributed to the day each API call "
+            "was made; agent runs are apportioned across the days they spanned.",
         ))
         cols = "".join(
             f'<div class="col" data-tip="{esc(d.strftime("%a %d %b"))}\n'

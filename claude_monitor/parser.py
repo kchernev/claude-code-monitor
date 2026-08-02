@@ -26,8 +26,9 @@ from .models import AgentRun, ApiCall, ModelStat, Session, Usage, _utc
 # Bump whenever parse output changes shape *or meaning* — cached entries carry
 # no parser version of their own, so a stale format would silently disagree
 # with freshly parsed sessions. v9: injected-prefix screening for list-form
-# user records.
-CACHE_VERSION = 9
+# user records. v10: timeline points carry uncached cost, so daily attribution
+# can be exact per call.
+CACHE_VERSION = 10
 
 # Unique-per-record fallback identity. Never reuse ``id(rec)`` here: CPython
 # recycles addresses as records are garbage-collected between iterations, so
@@ -165,7 +166,8 @@ def _apply_assistant(
 
     if timeline is not None and ts is not None:
         timeline.append(
-            (ts.timestamp(), usage.output_tokens, usage.total_input, call.cost)
+            (ts.timestamp(), usage.output_tokens, usage.total_input,
+             call.cost, uncached)
         )
     return call
 

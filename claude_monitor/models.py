@@ -306,8 +306,9 @@ class Session:
     prompts: List[dict] = field(default_factory=list)
     files_touched: Dict[str, int] = field(default_factory=dict)
 
-    # Rolling series used for velocity and context-pressure charts.
-    # Each entry is (epoch_seconds, output_tokens, context_tokens, cost).
+    # Rolling series used for velocity, context-pressure and daily-spend
+    # charts. Each entry is
+    # (epoch_seconds, output_tokens, context_tokens, cost, uncached_cost).
     timeline: List[tuple] = field(default_factory=list)
 
     peak_context: int = 0
