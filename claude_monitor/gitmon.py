@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import threading
 import time
@@ -32,6 +33,7 @@ CHART_BUCKETS = 240            # max points served per history request
 _RECENT_EVERY = 6              # ticks between samples, repo active in last 48h
 _IDLE_EVERY = 60               # ticks between samples, older repos
 _COMMITS_TTL = 30.0            # seconds to cache a repo's commit log
+_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------- git helpers
@@ -187,7 +189,6 @@ class GitMonitor:
         self._latest: Dict[str, dict] = {}    # rid -> last sample_repo() dict
         self._samples: Dict[str, List[Tuple[float, int]]] = {}  # rid -> (t, wip)
         self._toplevel: Dict[str, Tuple[Optional[str], float]] = {}
-        self._commit_log: Dict[str, Tuple[float, List[dict]]] = {}
         self._stats_log: Dict[str, Tuple[float, List[dict]]] = {}
         self._tick = 0
         self._stop = threading.Event()
@@ -293,41 +294,10 @@ class GitMonitor:
             if self._stop.wait(self.interval):
                 break
 
-    # -- commit log (for the committed series and markers) ----------------
-
-    def _commits(self, rid: str, path: str) -> List[dict]:
-        now = time.time()
-        hit = self._commit_log.get(rid)
-        if hit and now - hit[0] < _COMMITS_TTL:
-            return hit[1]
-        out: List[dict] = []
-        cur: Optional[dict] = None
-        text = run_git(path, "log", "--since=25.hours", "-n", "2000",
-                       "--numstat", "--format=%x01%ct%x09%h%x09%s", timeout=20)
-        for line in text.splitlines():
-            if line.startswith("\x01"):
-                parts = line[1:].split("\t", 2)
-                if len(parts) == 3 and parts[0].isdigit():
-                    cur = {"t": int(parts[0]), "hash": parts[1],
-                           "subject": parts[2], "add": 0}
-                    out.append(cur)
-                else:
-                    cur = None
-            elif cur is not None and "\t" in line:
-                parts = line.split("\t", 2)
-                if len(parts) == 3 and parts[0].isdigit():
-                    cur["add"] += int(parts[0])
-        out.reverse()  # oldest first
-        self._commit_log[rid] = (now, out)
-        return out
+    # -- commit log (one 30-day cache serves the chart and the stats tab) --
 
     def _commit_stats(self, rid: str, path: str) -> List[dict]:
-        """Per-commit numstat for the last 30 days, briefly cached.
-
-        Richer than :meth:`_commits` (author + per-file churn + deletions),
-        and correspondingly heavier, so it is fetched lazily on the stats
-        endpoint rather than by the sampler.
-        """
+        """Per-commit numstat for the last 30 days, briefly cached."""
         now = time.time()
         hit = self._stats_log.get(rid)
         if hit and now - hit[0] < _COMMITS_TTL:
@@ -335,12 +305,14 @@ class GitMonitor:
         commits: List[dict] = []
         cur: Optional[dict] = None
         text = run_git(path, "log", "--since=30.days", "-n", "3000",
-                       "--numstat", "--format=%x01%ct%x09%an", timeout=30)
+                       "--numstat", "--format=%x01%ct%x09%h%x09%an%x09%s",
+                       timeout=30)
         for line in text.splitlines():
             if line.startswith("\x01"):
-                parts = line[1:].split("\t", 1)
-                if len(parts) == 2 and parts[0].isdigit():
-                    cur = {"t": int(parts[0]), "author": parts[1],
+                parts = line[1:].split("\t", 3)
+                if len(parts) == 4 and parts[0].isdigit():
+                    cur = {"t": int(parts[0]), "hash": parts[1],
+                           "author": parts[2], "subject": parts[3],
                            "add": 0, "del": 0, "files": []}
                     commits.append(cur)
                 else:
@@ -356,12 +328,17 @@ class GitMonitor:
         self._stats_log[rid] = (now, commits)
         return commits
 
-    def stats(self, repo_sel: str, range_s: int,
-              days: Optional[int] = None) -> dict:
-        """Commit analytics across repos for the window (GitMonitor's Stats tab)."""
+    def stats(self, repo_sel: str, window_s: Optional[int] = None) -> dict:
+        """Commit analytics across repos for the window (GitMonitor's Stats tab).
+
+        One window drives everything: which repos count (session activity)
+        and how far back the commits go — capped at the 30 days the log
+        cache holds.
+        """
         now = time.time()
+        range_s = min(window_s or 30 * 86400, 30 * 86400)
         start = now - range_s
-        repos = self._shown(days)
+        repos = self._shown(window_s)
         if repo_sel != "all":
             repos = [r for r in repos if r["id"] == repo_sel]
         multi = len(repos) > 1
@@ -433,20 +410,149 @@ class GitMonitor:
                        "days": len(days_active)},
         }
 
+    # -- repo explorer ----------------------------------------------------
+
+    def _repo(self, rid: str) -> Optional[dict]:
+        return next((r for r in self._all_repos() if r["id"] == rid), None)
+
+    def repo_detail(self, rid: str) -> Optional[dict]:
+        """Everything the repo page needs: live state plus the commit graph.
+
+        The graph covers the last 180 commits across *all* branches in date
+        order, with parent shas so the client can lay out lanes, and ref
+        names so branch tips and tags render as chips. Per-commit churn is
+        joined in from the 30-day numstat cache where available.
+        """
+        repo = self._repo(rid)
+        if repo is None:
+            return None
+        path = repo["path"]
+        with self._lock:
+            latest = dict(self._latest.get(rid) or {})
+
+        churn: Dict[str, Tuple[int, int]] = {}
+        for c in self._commit_stats(rid, path):
+            churn[c["hash"]] = (c["add"], c["del"])
+
+        commits = []
+        text = run_git(path, "log", "--all", "--date-order", "-n", "180",
+                       "--format=%H%x09%h%x09%P%x09%ct%x09%an%x09%D%x09%s",
+                       timeout=20)
+        for line in text.splitlines():
+            parts = line.split("\t", 6)
+            if len(parts) != 7:
+                continue
+            sha, short, parents, ct, author, refs, subject = parts
+            ad = churn.get(short)
+            commits.append({
+                "sha": sha, "short": short,
+                "parents": parents.split() if parents else [],
+                "t": int(ct) if ct.isdigit() else 0,
+                "author": author,
+                "refs": [x.strip() for x in refs.split(",") if x.strip()],
+                "subject": subject,
+                "add": ad[0] if ad else None,
+                "del": ad[1] if ad else None,
+            })
+
+        project = max(repo["projects"], key=repo["projects"].get) \
+            if repo["projects"] else repo["name"]
+        return {
+            "id": rid, "name": repo["name"], "path": path, "project": project,
+            "sessions": repo["sessions"], "live": repo["live"],
+            "cost": repo["cost"],
+            "last_activity": repo["last_activity"].isoformat()
+            if repo["last_activity"] else None,
+            "stats": latest or None,
+            "commits": commits,
+        }
+
+    def commit_detail(self, rid: str, sha: str) -> Optional[dict]:
+        """One commit, fully: message, files with churn, and a capped patch.
+
+        ``sha`` must be a bare hex id — never a ref — so a crafted URL can't
+        smuggle git options or rev expressions into the subprocess.
+        """
+        if not _SHA_RE.match(sha or ""):
+            return None
+        repo = self._repo(rid)
+        if repo is None:
+            return None
+        path = repo["path"]
+        meta = run_git(path, "show", "-s",
+                       "--format=%H%x09%h%x09%an%x09%ae%x09%ct%x09%P", sha)
+        line = meta.strip().splitlines()[0] if meta.strip() else ""
+        parts = line.split("\t", 5)
+        if len(parts) != 6:
+            return None
+        body = run_git(path, "show", "-s", "--format=%B", sha).strip()
+
+        files = []
+        ta = td = 0
+        for ln in run_git(path, "show", "--numstat", "--format=",
+                          sha).splitlines():
+            p = ln.split("\t", 2)
+            if len(p) == 3:
+                a = int(p[0]) if p[0].isdigit() else 0
+                d = int(p[1]) if p[1].isdigit() else 0
+                files.append({"file": p[2], "add": a, "del": d})
+                ta += a
+                td += d
+
+        # Patch, split per file and capped hard — a lockfile commit can be
+        # hundreds of thousands of lines and the browser needs none of that.
+        patch = run_git(path, "show", "--no-color", "--format=", sha,
+                        timeout=20)
+        sections: List[dict] = []
+        cur: Optional[dict] = None
+        total = 0
+        patch_truncated = False
+        for ln in patch.splitlines():
+            if ln.startswith("diff --git "):
+                name = ln.split(" b/", 1)[-1] if " b/" in ln else ln[11:]
+                cur = {"file": name, "lines": [], "truncated": False}
+                sections.append(cur)
+                continue
+            if cur is None:
+                continue
+            if total >= 4000:
+                patch_truncated = True
+                break
+            if len(cur["lines"]) >= 500:
+                cur["truncated"] = True
+                continue
+            cur["lines"].append(ln)
+            total += 1
+
+        return {
+            "sha": parts[0], "short": parts[1], "author": parts[2],
+            "email": parts[3],
+            "t": int(parts[4]) if parts[4].isdigit() else 0,
+            "parents": parts[5].split() if parts[5] else [],
+            "message": body[:4000],
+            "files": files, "add": ta, "del": td,
+            "patch": [
+                {"file": s["file"], "text": "\n".join(s["lines"])[:80000],
+                 "truncated": s["truncated"]}
+                for s in sections[:40]
+            ],
+            "patch_truncated": patch_truncated or len(sections) > 40,
+        }
+
     # -- payloads ---------------------------------------------------------
 
     def _all_repos(self) -> List[dict]:
         with self._lock:
             return [dict(r) for r in self._repos.values()]
 
-    def _shown(self, days: Optional[int]) -> List[dict]:
+    def _shown(self, window_s: Optional[int]) -> List[dict]:
         """Repos with session activity inside the window; live always counts.
 
-        ``days`` falsy means everything — the "All" pill.
+        ``window_s`` falsy means everything — the "All" pill.
         """
         repos = self._all_repos()
-        if days:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        if window_s:
+            cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_s)
             repos = [
                 r for r in repos
                 if r["live"] or (r["last_activity"]
@@ -454,9 +560,9 @@ class GitMonitor:
             ]
         return repos
 
-    def snapshot(self, days: Optional[int] = None) -> dict:
+    def snapshot(self, window_s: Optional[int] = None) -> dict:
         now = time.time()
-        repos = self._shown(days)
+        repos = self._shown(window_s)
         out = []
         tot = {"wip": 0, "staged": 0, "unstaged": 0, "untracked": 0,
                "committed_today": 0, "commits_today": 0, "dirty": 0}
@@ -504,18 +610,19 @@ class GitMonitor:
             "sampling_since": self.started_at,
         }
 
-    def history(self, repo_sel: str, range_s: int,
-                days: Optional[int] = None) -> dict:
+    def history(self, repo_sel: str, window_s: Optional[int] = None) -> dict:
         """WIP + committed series and commit markers over the trailing window.
 
         WIP comes from the in-memory samples (buckets with no sample within the
         forward-fill TTL are null, so gaps render as gaps). Committed is the
         cumulative lines added by commits inside the window, rebuilt from
-        ``git log`` — exact regardless of when the server started.
+        ``git log`` — exact regardless of when the server started. The same
+        window also picks which repos count, capped at the 30-day log reach.
         """
         now = time.time()
+        range_s = min(window_s or 30 * 86400, 30 * 86400)
         start = now - range_s
-        repos = self._shown(days)
+        repos = self._shown(window_s)
         if repo_sel != "all":
             repos = [r for r in repos if r["id"] == repo_sel]
         rids = [r["id"] for r in repos]
@@ -544,7 +651,7 @@ class GitMonitor:
         events: List[Tuple[float, int]] = []
         markers: List[dict] = []
         for r in repos:
-            for c in self._commits(r["id"], r["path"]):
+            for c in self._commit_stats(r["id"], r["path"]):
                 if c["t"] >= start:
                     events.append((c["t"], c["add"]))
                     markers.append({"t": c["t"], "hash": c["hash"],

@@ -845,24 +845,43 @@ def create_app(claude_dir: Optional[Path] = None, *,
         return jsonify({"workflows": out})
 
     # -- git --------------------------------------------------------------
+    def _git_window() -> Optional[int]:
+        """The Git section's single time window: seconds, or None for all."""
+        raw = (request.args.get("range") or "").strip().lower()
+        if raw in ("", "all"):
+            return None if raw == "all" else 86400
+        try:
+            return max(3600, min(int(raw), 30 * 86400))
+        except ValueError:
+            return 86400
+
     @app.route("/api/git")
     def api_git():
-        return jsonify(gitmon.snapshot(days=request.args.get("days", type=int)))
+        return jsonify(gitmon.snapshot(_git_window()))
 
     @app.route("/api/git/history")
     def api_git_history():
-        rng = max(900, min(request.args.get("range", type=int) or 3600, 86400))
         repo = (request.args.get("repo") or "all").strip()
-        return jsonify(gitmon.history(
-            repo, rng, days=request.args.get("days", type=int)))
+        return jsonify(gitmon.history(repo, _git_window()))
 
     @app.route("/api/git/stats")
     def api_git_stats():
-        rng = max(3600, min(request.args.get("range", type=int) or 604800,
-                            30 * 86400))
         repo = (request.args.get("repo") or "all").strip()
-        return jsonify(gitmon.stats(
-            repo, rng, days=request.args.get("days", type=int)))
+        return jsonify(gitmon.stats(repo, _git_window()))
+
+    @app.route("/api/git/repo/<rid>")
+    def api_git_repo(rid: str):
+        d = gitmon.repo_detail(rid)
+        if d is None:
+            return jsonify({"error": "unknown repo"}), 404
+        return jsonify(d)
+
+    @app.route("/api/git/repo/<rid>/commits/<sha>")
+    def api_git_commit(rid: str, sha: str):
+        d = gitmon.commit_detail(rid, sha)
+        if d is None:
+            return jsonify({"error": "unknown commit"}), 404
+        return jsonify(d)
 
     # -- misc -------------------------------------------------------------
     @app.route("/api/reindex", methods=["POST"])

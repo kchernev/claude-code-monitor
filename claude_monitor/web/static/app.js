@@ -1448,8 +1448,27 @@ views.workflows = async () => {
 };
 
 // ── git view ──────────────────────────────────────────────────────────
-const GIT_RANGES = [[900, '15m'], [3600, '1h'], [14400, '4h'], [86400, '24h']];
-const GIT_STAT_RANGES = [[86400, '24h'], [604800, '7d'], [2592000, '30d']];
+// One time window for the whole section: repos included (session activity),
+// chart span, and stats range all follow it. 'all' shows every repo but the
+// charts still cap at the 30 days the commit-log cache reaches.
+const GIT_RANGES = [['3600', '1h'], ['14400', '4h'], ['86400', '24h'],
+                    ['604800', '7d'], ['2592000', '30d'], ['all', 'All']];
+const GIT_DEFAULT_RANGE = '86400';
+const gitRangeLabel = v =>
+  (GIT_RANGES.find(([x]) => x === v) || [0, '24h'])[1];
+const gitWindowText = v => v === 'all' ? 'all time' : `the last ${gitRangeLabel(v)}`;
+
+const gitRangePills = rng =>
+  `<div class="pills" id="gitRange" role="group" aria-label="Time window">
+    ${GIT_RANGES.map(([v, l]) =>
+      `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
+  </div>`;
+
+function wireGitRange(rng) {
+  $$('#gitRange button').forEach(b =>
+    b.addEventListener('click', () =>
+      gitSetP({ range: b.dataset.r === GIT_DEFAULT_RANGE ? null : b.dataset.r })));
+}
 
 function gitSetP(patch) {
   const p = new URLSearchParams(location.hash.split('?')[1] || '');
@@ -1467,19 +1486,20 @@ const gitTabs = view => `<div class="pills" id="gitTabs" role="group" aria-label
 function wireGitTabs(view) {
   $$('#gitTabs button').forEach(b => b.addEventListener('click', () => {
     if (b.dataset.v === view) return;
-    // range means different things per tab; reset it on switch
-    gitSetP({ view: b.dataset.v === 'live' ? null : b.dataset.v, range: null });
+    // the window is shared between tabs, so it survives the switch
+    gitSetP({ view: b.dataset.v === 'live' ? null : b.dataset.v });
   }));
 }
 
-views.git = async (params) => {
+views.git = async (params, sub, rid) => {
+  if (sub === 'repo' && rid) return gitRepoView(params, rid);
   const view = params.get('view') || 'live';
   const repo = params.get('repo') || 'all';
   if (view === 'stats') return gitStatsView(params, repo);
 
-  const rng = +(params.get('range') || 3600);
+  const rng = params.get('range') || GIT_DEFAULT_RANGE;
   const [d, h] = await Promise.all([
-    api('/api/git'),
+    api('/api/git', { range: rng }),
     api('/api/git/history', { range: rng, repo }),
   ]);
   const t = d.totals;
@@ -1508,7 +1528,9 @@ views.git = async (params) => {
       ? ago(new Date(st.commits[0].t * 1000).toISOString()) : '—';
     return `<div class="card gcard${repo === r.id ? ' scoped' : ''}">
       <div class="ch">
-        <div><h2>${avatar(r.name)} ${esc(r.name)}
+        <div><h2><a class="repolink" href="#/git/repo/${esc(r.id)}"
+            title="Explore ${esc(r.name)} — commits, tree, changes">${
+            avatar(r.name)} ${esc(r.name)}</a>
           ${r.live ? `<span class="st live" style="margin-left:6px"><i></i>${
             r.live} live</span>` : ''}</h2>
           <p class="sub num">${st ? `${esc(st.branch)}${upstream} · ` : ''}last commit ${
@@ -1544,9 +1566,9 @@ views.git = async (params) => {
   $('#view').innerHTML = `
     <div class="hd">
       <div><h1>Git</h1><p class="sub">${d.repos.length} repositor${
-        d.repos.length === 1 ? 'y' : 'ies'} with sessions in the last ${
-        winLabel()} · sampled every ${d.interval.toFixed(0)}s</p></div>
-      <div class="right">${windowPicker()}${gitTabs('live')}</div>
+        d.repos.length === 1 ? 'y' : 'ies'} with sessions in ${
+        gitWindowText(rng)} · sampled every ${d.interval.toFixed(0)}s</p></div>
+      <div class="right">${gitRangePills(rng)}${gitTabs('live')}</div>
     </div>
 
     <div class="kpis">
@@ -1564,13 +1586,7 @@ views.git = async (params) => {
           <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
     </div>
 
-    <div class="sect" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
-      <span>Code written${scoped ? ` — ${esc(scoped.name)}` : ''}</span>
-      <div class="pills" id="gitRange" role="group" aria-label="Chart range">
-        ${GIT_RANGES.map(([v, l]) =>
-          `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
-      </div>
-    </div>
+    <div class="sect">Code written${scoped ? ` — ${esc(scoped.name)}` : ''}</div>
     <section class="blk" style="display:grid;margin-top:0;
         grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">
       <div class="card">
@@ -1592,25 +1608,25 @@ views.git = async (params) => {
       '<div class="empty"><b>No repositories found</b>No session ran inside a git repository.</div>'}</div>`;
 
   hydrateTips($('#view'));
-  wireWindow($('#view'));
   wireGitTabs('live');
+  wireGitRange(rng);
   gitChart($('#gitCommitted'), h.points,
            { mode: 'committed', commits: h.commits,
              start: h.start, end: h.end, height: 200 });
   gitChart($('#gitWip'), h.points,
            { mode: 'wip', start: h.start, end: h.end, height: 200 });
-  $$('#gitRange button').forEach(b =>
-    b.addEventListener('click', () =>
-      gitSetP({ range: b.dataset.r === '3600' ? null : b.dataset.r })));
   $$('.gcard .scope').forEach(b =>
-    b.addEventListener('click', () =>
-      gitSetP({ repo: b.dataset.repo === repo ? null : b.dataset.repo })));
+    b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      gitSetP({ repo: b.dataset.repo === repo ? null : b.dataset.repo });
+    }));
+  wireTable($('#view'));
 };
 
 async function gitStatsView(params, repo) {
-  const rng = +(params.get('range') || 604800);
+  const rng = params.get('range') || GIT_DEFAULT_RANGE;
   const [d, st] = await Promise.all([
-    api('/api/git'),
+    api('/api/git', { range: rng }),
     api('/api/git/stats', { range: rng, repo }),
   ]);
   const scoped = repo !== 'all' ? d.repos.find(r => r.id === repo) : null;
@@ -1619,16 +1635,11 @@ async function gitStatsView(params, repo) {
   $('#view').innerHTML = `
     <div class="hd">
       <div><h1>Git</h1><p class="sub">Commit analytics${scoped
-        ? ` — ${esc(scoped.name)}` : ` across ${d.repos.length} repos (sessions
-        in the last ${winLabel()})`} · commits from the last ${
-        (GIT_STAT_RANGES.find(([v]) => v === rng) || [0, '?'])[1]}</p></div>
+        ? ` — ${esc(scoped.name)}` : ` across ${d.repos.length} repos`} · ${
+        gitWindowText(rng)}</p></div>
       <div class="right">
         ${scoped ? `<a class="btn" href="#/git?view=stats">All repos ✕</a>` : ''}
-        ${windowPicker()}
-        <div class="pills" id="gitRange" role="group" aria-label="Stats range">
-          ${GIT_STAT_RANGES.map(([v, l]) =>
-            `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
-        </div>
+        ${gitRangePills(rng)}
         ${gitTabs('stats')}
       </div>
     </div>
@@ -1677,8 +1688,8 @@ async function gitStatsView(params, repo) {
     </section>`;
 
   hydrateTips($('#view'));
-  wireWindow($('#view'));
   wireGitTabs('stats');
+  wireGitRange(rng);
   const bl = st.buckets;
   const blab = b => st.per_day
     ? new Date(b.t * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
@@ -1695,9 +1706,227 @@ async function gitStatsView(params, repo) {
     v: n, label: hr % 3 === 0 ? String(hr) : '',
     tip: `${hr}:00–${hr + 1}:00\n${n} commit${n === 1 ? '' : 's'}`,
   })), { height: 170, fmt: v => Math.round(v), color: 'var(--gold)' });
-  $$('#gitRange button').forEach(b =>
-    b.addEventListener('click', () =>
-      gitSetP({ range: b.dataset.r === '604800' ? null : b.dataset.r })));
+}
+
+// ── git repo explorer ─────────────────────────────────────────────────
+
+/** Lane layout for a commit DAG (newest first, like `git log --graph`).
+    Each row gets: its lane, which lanes pass through, joins (child branches
+    folding into this commit) and forks (merge parents fanning out below). */
+function layoutGraph(commits) {
+  const lanes = [];      // sha each lane expects next
+  const rows = [];
+  for (const c of commits) {
+    let lane = lanes.indexOf(c.sha);
+    const hadIncoming = lane !== -1;
+    if (lane === -1) {
+      lane = lanes.indexOf(null);
+      if (lane === -1) { lane = lanes.length; lanes.push(null); }
+    }
+    // other lanes waiting for this same commit fold into it here
+    const joins = [];
+    lanes.forEach((h, i) => {
+      if (h === c.sha && i !== lane) { joins.push(i); lanes[i] = null; }
+    });
+    const passThrough = lanes.map((h, i) => h != null && i !== lane);
+    lanes[lane] = c.parents[0] || null;
+    const forks = [];
+    for (let pi = 1; pi < c.parents.length; pi++) {
+      const p = c.parents[pi];
+      let pl = lanes.indexOf(p);
+      if (pl === -1) {
+        pl = lanes.indexOf(null);
+        if (pl === -1) { pl = lanes.length; lanes.push(null); }
+        lanes[pl] = p;
+      }
+      forks.push(pl);
+    }
+    rows.push({
+      c, lane, joins, forks, passThrough, hadIncoming,
+      hasParent: c.parents.length > 0,
+      width: lanes.length,
+    });
+    while (lanes.length && lanes[lanes.length - 1] == null) lanes.pop();
+  }
+  const maxLanes = Math.min(
+    Math.max(...rows.map(r => Math.max(r.lane + 1, r.width)), 1), 12);
+  return { rows, maxLanes };
+}
+
+const LANE_W = 14, ROW_H = 40;
+const laneColor = i => HUES[i % HUES.length];
+
+/** Per-row SVG cell: pass-through lines, the commit dot, join/fork curves. */
+function graphCell(row, maxLanes) {
+  const w = maxLanes * LANE_W, mid = ROW_H / 2;
+  const x = i => i * LANE_W + LANE_W / 2;
+  let p = '';
+  row.passThrough.forEach((on, i) => {
+    if (on && i < maxLanes) p += `<path d="M${x(i)} 0V${ROW_H}" stroke="${
+      laneColor(i)}" stroke-width="2" fill="none" opacity=".55"/>`;
+  });
+  const lx = x(Math.min(row.lane, maxLanes - 1));
+  if (row.hadIncoming)
+    p += `<path d="M${lx} 0V${mid}" stroke="${laneColor(row.lane)}" stroke-width="2"/>`;
+  if (row.hasParent)
+    p += `<path d="M${lx} ${mid}V${ROW_H}" stroke="${laneColor(row.lane)}" stroke-width="2"/>`;
+  for (const j of row.joins) {
+    if (j >= maxLanes) continue;
+    p += `<path d="M${x(j)} 0C${x(j)} ${mid} ${lx} ${mid * 0.6} ${lx} ${mid}"
+      stroke="${laneColor(j)}" stroke-width="2" fill="none"/>`;
+  }
+  for (const f of row.forks) {
+    if (f >= maxLanes) continue;
+    p += `<path d="M${lx} ${mid}C${x(f)} ${mid * 1.4} ${x(f)} ${mid} ${x(f)} ${ROW_H}"
+      stroke="${laneColor(f)}" stroke-width="2" fill="none"/>`;
+  }
+  const merge = row.c.parents.length > 1;
+  p += `<circle cx="${lx}" cy="${mid}" r="${merge ? 3.5 : 4.5}"
+    fill="${merge ? 'var(--card)' : laneColor(row.lane)}"
+    stroke="${laneColor(row.lane)}" stroke-width="${merge ? 2 : 1.5}"/>`;
+  return `<svg width="${w}" height="${ROW_H}" viewBox="0 0 ${w} ${ROW_H}"
+    aria-hidden="true">${p}</svg>`;
+}
+
+const refChip = r => {
+  const tag = r.startsWith('tag: ');
+  const head = r.includes('HEAD');
+  const name = r.replace('tag: ', '').replace('HEAD -> ', '');
+  return `<span class="refchip${tag ? ' tag' : ''}${head ? ' head' : ''}">${
+    tag ? '⌂ ' : ''}${esc(name)}</span>`;
+};
+
+function renderCommitDetail(host, c) {
+  if (!c) {
+    host.innerHTML = '<div class="empty"><b>Pick a commit</b>Click any row in the history to inspect it.</div>';
+    return;
+  }
+  const peak = Math.max(...c.files.map(f => f.add + f.del), 1);
+  const fileRows = c.files.map(f => `
+    <div class="gfile"><span class="fp" title="${esc(f.file)}">${esc(f.file)}</span>
+      <span class="fbar"><i style="width:${
+        Math.max(3, 100 * (f.add + f.del) / peak).toFixed(0)}%"></i></span>
+      <span><b class="gadd">+${f.add.toLocaleString()}</b> <b class="gdel">−${
+        f.del.toLocaleString()}</b></span></div>`).join('');
+  const diffs = (c.patch || []).map((s, i) => `
+    <details class="dfile"${(c.patch.length === 1 && !s.truncated) ? ' open' : ''}>
+      <summary><code>${esc(s.file)}</code>${
+        s.truncated ? '<span class="mut"> · truncated</span>' : ''}</summary>
+      <pre class="diff">${s.text.split('\n').map(l => {
+        const e = esc(l);
+        if (l.startsWith('+')) return `<i class="da">${e}</i>`;
+        if (l.startsWith('-')) return `<i class="dd">${e}</i>`;
+        if (l.startsWith('@@')) return `<i class="dh">${e}</i>`;
+        return `<i>${e}</i>`;
+      }).join('\n')}</pre>
+    </details>`).join('');
+  const [subject, ...rest] = (c.message || '').split('\n');
+  const body = rest.join('\n').trim();
+  host.innerHTML = `
+    <div class="cmt-head">
+      <h3>${esc(subject)}</h3>
+      <div class="cmt-meta">
+        <code>${esc(c.short)}</code> · ${esc(c.author)} ·
+        ${dt(new Date(c.t * 1000).toISOString())}
+        <span style="margin-left:auto"><b class="gadd">+${c.add.toLocaleString()}</b>
+        <b class="gdel">−${c.del.toLocaleString()}</b> ·
+        ${c.files.length} file${c.files.length === 1 ? '' : 's'}</span>
+      </div>
+      ${body ? `<pre class="cmt-body">${esc(body)}</pre>` : ''}
+    </div>
+    <div class="gfiles" style="border:0;padding-top:0">${fileRows}</div>
+    ${diffs ? `<div class="sect" style="margin:14px 0 6px">Changes</div>${diffs}` : ''}
+    ${c.patch_truncated ? '<p class="mut" style="font-size:.75rem">Large commit — the patch is capped for display.</p>' : ''}`;
+}
+
+async function gitRepoView(params, rid) {
+  const d = await api(`/api/git/repo/${rid}`);
+  const sel = params.get('c') || (d.commits[0] && d.commits[0].sha) || '';
+  const st = d.stats;
+  const { rows, maxLanes } = layoutGraph(d.commits);
+  const authors = new Set(d.commits.map(c => c.author));
+
+  const hist = rows.map(row => {
+    const c = row.c;
+    return `<div class="grow-row${c.sha === sel ? ' sel' : ''}" data-sha="${esc(c.sha)}"
+        tabindex="0" role="button">
+      <span class="gcell">${graphCell(row, maxLanes)}</span>
+      <span class="gmsg">
+        ${(c.refs || []).map(refChip).join('')}
+        <span class="gsub" title="${esc(c.subject)}">${esc(c.subject)}</span>
+      </span>
+      <span class="gchurn">${c.add != null
+        ? `<b class="gadd">+${tok(c.add)}</b> <b class="gdel">−${tok(c.del)}</b>` : ''}</span>
+      <span class="gwho" title="${esc(c.author)}">${esc(c.author.split(' ')[0])}</span>
+      <span class="dur">${ago(new Date(c.t * 1000).toISOString())}</span>
+    </div>`;
+  }).join('');
+
+  $('#view').innerHTML = `
+    <div class="crumb"><a href="#/git">Git</a> / ${esc(d.name)}</div>
+    <div class="hd">
+      <div><h1>${avatar(d.name)} ${esc(d.name)}
+        ${d.live ? `<span class="st live" style="margin-left:8px"><i></i>${
+          d.live} live</span>` : ''}</h1>
+        <p class="sub num">${st ? `${esc(st.branch)} · ` : ''}${esc(d.path)}</p></div>
+      <div class="right">
+        <a class="btn" href="#/sessions?project=${encodeURIComponent(d.project)}">Sessions →</a>
+      </div>
+    </div>
+
+    <div class="kpis">
+      ${[[st ? st.wip.toLocaleString() : '—', 'Uncommitted lines',
+          st && st.wip ? `${st.unstaged_add.toLocaleString()} unstaged · ${
+            st.untracked_lines.toLocaleString()} untracked` : 'working tree clean'],
+         [st ? st.commits_today : '—', 'Commits today',
+          st ? `+${st.committed_add.toLocaleString()} lines` : ''],
+         [d.commits.length, 'Commits shown', 'all branches, newest first'],
+         [authors.size, `Author${authors.size === 1 ? '' : 's'}`, 'in this graph'],
+         [`${d.sessions}`, 'Claude sessions', `${usd(d.cost)} spent here`]]
+        .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
+          <div class="v">${v}</div>
+          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
+    </div>
+
+    <section class="blk repo-split">
+      <div class="card">
+        <div class="ch"><h2>History</h2><span class="meta">click a commit ·
+          ◦ merge</span></div>
+        <div class="cb ghist" id="ghist">${hist ||
+          '<div class="empty">No commits found.</div>'}</div>
+      </div>
+      <div class="card">
+        <div class="ch"><h2>Commit</h2><span class="meta" id="cmtMeta"></span></div>
+        <div class="cb gdetail" id="gdetail">
+          <div class="skel">${'<div class="skel-row"></div>'.repeat(6)}</div>
+        </div>
+      </div>
+    </section>`;
+
+  hydrateTips($('#view'));
+  const detail = $('#gdetail');
+  const load = async sha => {
+    try {
+      renderCommitDetail(detail, await api(`/api/git/repo/${rid}/commits/${sha}`));
+    } catch (e) {
+      detail.innerHTML = `<div class="empty"><b>Couldn't load commit</b>${esc(e.message)}</div>`;
+    }
+  };
+  $$('.grow-row', $('#ghist')).forEach(el => {
+    const pick = () => {
+      $$('.grow-row.sel').forEach(x => x.classList.remove('sel'));
+      el.classList.add('sel');
+      const p = new URLSearchParams(location.hash.split('?')[1] || '');
+      p.set('c', el.dataset.sha);
+      history.replaceState(null, '', `#/git/repo/${rid}?${p}`);
+      load(el.dataset.sha);
+    };
+    el.addEventListener('click', pick);
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+    });
+  });
+  if (sel) load(sel);
 }
 
 // severity → color for plan-limit bars (bright variants; text uses AA inks)
