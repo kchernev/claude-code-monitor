@@ -515,10 +515,10 @@ function heatmap(cells) {
   return html;
 }
 
-/** One git series per chart. mode 'committed': violet columns — lines landed
-    per interval — with a diamond marker per commit. mode 'wip': green line
-    with gaps where the monitor wasn't sampling. Each gets its own scale — on
-    one axis a 20K-line WIP flattens a 500-line commit into invisibility. */
+/** One git series per chart. mode 'committed': violet area stepping up at
+    commits, diamond marker per commit. mode 'wip': green line with gaps
+    where the monitor wasn't sampling. Each gets its own scale — on one axis
+    a 20K-line WIP flattens a 500-line committed step into invisibility. */
 function gitChart(host, rows, opts = {}) {
   const W = host.clientWidth || 700, H = opts.height || 200;
   const pad = { t: 10, r: 8, b: 24, l: 52 };
@@ -526,27 +526,6 @@ function gitChart(host, rows, opts = {}) {
   const commits = opts.commits || [];
   host.innerHTML = '';
   if (!rows.length) { host.innerHTML = '<div class="empty">No data</div>'; return; }
-  if (!wip) {
-    // One candle per natural time unit, computed server-side (24h → 24
-    // hourly candles). The 240-bucket points grid stays for the WIP line.
-    if (opts.candles && opts.candles.length) {
-      rows = opts.candles.map(c =>
-        ({ t: c.t, tEnd: c.t_end, committed: c.committed }));
-    } else {
-      // fallback for a payload without candles: coalesce to ~64 bars
-      const g = Math.max(1, Math.ceil(rows.length / 64));
-      const agg = [];
-      for (let i = 0; i < rows.length; i += g) {
-        const chunk = rows.slice(i, i + g);
-        agg.push({
-          t: chunk[0].t,
-          tEnd: chunk[chunk.length - 1].t,
-          committed: chunk.reduce((a, r) => a + (r.committed || 0), 0),
-        });
-      }
-      rows = agg;
-    }
-  }
   const val = r => wip ? r.wip : r.committed;
   const mx = Math.max(...rows.map(r => val(r) || 0), 10);
   const sc = niceScale(mx);
@@ -582,20 +561,18 @@ function gitChart(host, rows, opts = {}) {
     else host.insertAdjacentHTML('beforeend',
       '<div class="empty">No samples yet — the WIP line starts when the monitor starts.</div>');
   } else {
-    // Columns: lines committed in each interval. Bars, not a line — a line
-    // between sparse bucket sums would imply activity where there was none.
+    // Cumulative area: the line steps up at each commit.
+    const cd = rows.map((r, i) =>
+      `${i ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.committed).toFixed(1)}`).join('');
+    const gid = 'gc' + (++gradSeq);
+    const defs = svg('defs', {}, s);
+    const grad = svg('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+    svg('stop', { offset: 0, 'stop-color': '#7b5cfa', 'stop-opacity': .2 }, grad);
+    svg('stop', { offset: 1, 'stop-color': '#7b5cfa', 'stop-opacity': 0 }, grad);
+    svg('path', { d: `${cd}L${X(x1)},${H - pad.b}L${X(x0)},${H - pad.b}Z`,
+                  fill: `url(#${gid})` }, s);
+    svg('path', { class: 'ln', d: cd, stroke: color }, s);
     const yb = H - pad.b;
-    const iw = (W - pad.l - pad.r) / rows.length;
-    const bw = Math.max(2, iw - 3);
-    rows.forEach((r, i) => {
-      if (!r.committed) return;
-      const bh = Math.max(2, (r.committed / sc.max) * (H - pad.t - pad.b));
-      svg('rect', {
-        x: pad.l + i * iw + (iw - bw) / 2, y: yb - bh,
-        width: bw, height: bh, rx: Math.min(3, bw / 3),
-        fill: color, opacity: .85,
-      }, s);
-    });
     for (const c of commits) {
       const x = X(c.t);
       const m = svg('path', {
@@ -616,30 +593,16 @@ function gitChart(host, rows, opts = {}) {
   hit.addEventListener('mousemove', e => {
     const bb = s.getBoundingClientRect();
     const px = (e.clientX - bb.left) * (W / bb.width);
-    let best, cx;
-    if (wip) {
-      best = rows[0];
-      let bd = Infinity;
-      for (const r of rows) {
-        const dd = Math.abs(X(r.t) - px);
-        if (dd < bd) { bd = dd; best = r; }
-      }
-      cx = X(best.t);
-    } else {
-      // snap to the bar under the cursor, crosshair at its center
-      const iw = (W - pad.l - pad.r) / rows.length;
-      const idx = Math.max(0, Math.min(rows.length - 1,
-        Math.floor((px - pad.l) / iw)));
-      best = rows[idx];
-      cx = pad.l + idx * iw + iw / 2;
+    let best = rows[0], bd = Infinity;
+    for (const r of rows) {
+      const dd = Math.abs(X(r.t) - px);
+      if (dd < bd) { bd = dd; best = r; }
     }
-    cross.setAttribute('x1', cx); cross.setAttribute('x2', cx);
+    cross.setAttribute('x1', X(best.t)); cross.setAttribute('x2', X(best.t));
     cross.setAttribute('opacity', 1);
     const v = val(best);
-    tipEl.textContent = wip
-      ? `${fmtT(best.t)}\nWIP ${v == null ? '—' : v.toLocaleString() + ' lines'}`
-      : `${fmtT(best.t)} – ${fmtT(best.tEnd)}\n+${
-          (v || 0).toLocaleString()} lines committed`;
+    tipEl.textContent = `${fmtT(best.t)}\n${wip ? 'WIP' : 'committed'} ${
+      v == null ? '—' : v.toLocaleString() + ' lines'}`;
     tipEl.classList.add('on');
     tipEl.style.left = Math.min(e.clientX + 13, innerWidth - 220) + 'px';
     tipEl.style.top = (e.clientY - 46) + 'px';
@@ -1617,7 +1580,7 @@ views.git = async (params, sub, rid) => {
     <section class="blk" style="display:grid;margin-top:0;
         grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">
       <div class="card">
-        <div class="ch"><h2>Committed per interval</h2>
+        <div class="ch"><h2>Committed</h2>
           <span class="meta">${(h.total_committed || 0).toLocaleString()} lines · ${
             h.commit_count || 0} commit${h.commit_count === 1 ? '' : 's'} in window
             · ◆ hover for detail</span></div>
@@ -1638,7 +1601,7 @@ views.git = async (params, sub, rid) => {
   wireGitTabs('live');
   wireGitRange(rng);
   gitChart($('#gitCommitted'), h.points,
-           { mode: 'committed', commits: h.commits, candles: h.candles,
+           { mode: 'committed', commits: h.commits,
              start: h.start, end: h.end, height: 200 });
   gitChart($('#gitWip'), h.points,
            { mode: 'wip', start: h.start, end: h.end, height: 200 });
