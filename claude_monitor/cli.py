@@ -176,12 +176,21 @@ def cmd_sessions(console: Console, args) -> int:
     t.add_column("TOKENS", justify="right")
     t.add_column("PEAK CTX", justify="right")
     t.add_column("TOK/S", justify="right")
-    t.add_column("AG", justify="right", width=3)
+    t.add_column("AG", justify="right", width=6, no_wrap=True)
     t.add_column("COST", justify="right")
     t.add_column("WHEN", justify="right", no_wrap=True)
 
     for s in rows:
         u = s.total_usage
+        # "▶2/34" while agents are working, plain total once they're not.
+        running = sum(
+            1 for a in s.agents
+            if a.state(parent_live=s.is_live) == "running"
+        )
+        if running:
+            ag_cell = Text(f"▶{running}/{len(s.agents)}", style=C_LIVE)
+        else:
+            ag_cell = Text(str(len(s.agents)) if s.agents else "", style=C_AGENT)
         t.add_row(
             Text("●", style=C_LIVE if s.is_live else C_DIM),
             Text(_truncate(s.project, 18), style=C_TEXT),
@@ -192,7 +201,7 @@ def cmd_sessions(console: Console, args) -> int:
             pricing.fmt_tokens(u.total),
             pricing.fmt_tokens(s.peak_context),
             f"{s.output_tps:,.0f}" if s.output_tps else "—",
-            Text(str(len(s.agents)) if s.agents else "", style=C_AGENT),
+            ag_cell,
             Text(pricing.fmt_usd(s.total_cost), style=C_COST),
             Text(fmt_ago(s.ended), style=C_DIM),
         )

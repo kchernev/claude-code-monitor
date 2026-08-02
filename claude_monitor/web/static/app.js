@@ -528,6 +528,17 @@ const agentPill = state2 => {
   const [cls, label] = AGENT_ST[state2] || ['done', state2];
   return `<span class="st ${cls}"><i></i>${label}</span>`;
 };
+/** Agents cell: "2▶ /34" when some are working right now, plain total when
+    idle. The running count is what you actually scan the column for. */
+const agentsCell = s => {
+  const total = s.agents || 0;
+  const run2 = s.agents_running || 0;
+  if (!total) return '·';
+  if (!run2) return String(total);
+  return `<span class="agr" title="${run2} running now · ${total} total">${
+    run2}▶</span><span class="mut">/${total}</span>`;
+};
+
 const avatar = name => {
   // A project can legitimately have no name (transcript with no cwd); indexing
   // [0] on '' would throw and take the whole view down with it.
@@ -722,7 +733,7 @@ views.overview = async () => {
       av: avatar(s.project),
       sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
-      tk: tok(s.tokens), ag: s.agents || '·',
+      tk: tok(s.tokens), ag: agentsCell(s),
       cost: usd(s.cost), st: stPill(st),
       when: `<span class="dur">${ago(s.ended)}</span>`,
     };
@@ -847,7 +858,7 @@ views.sessions = async (params) => {
       sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
       turns: s.turns, calls: s.api_calls.toLocaleString(),
-      ag: s.agents || '·', tk: tok(s.tokens), cx: tok(s.peak_context),
+      ag: agentsCell(s), tk: tok(s.tokens), cx: tok(s.peak_context),
       cost: usd(s.cost), st: stPill(st),
       when: `<span class="dur">${ago(s.ended)}</span>`,
     };
@@ -930,7 +941,10 @@ views.session = async (params, sid) => {
          [tok(s.usage.total), 'Tokens', `${pct(s.usage.cache_hit_rate)} cached`],
          [tok(s.peak_context), 'Peak context', 'largest single call'],
          [s.turns, 'Your turns', `${s.api_calls.toLocaleString()} API calls`],
-         [s.agents.length, 'Subagents', `${s.tool_errors} tool errors`],
+         [s.agents.length, 'Subagents',
+          `${(r2 => r2 ? `${r2} running now · ` : '')(
+            s.agents.filter(a => a.state === 'running').length)}${
+            s.tool_errors} tool errors`],
          [`<span class="dur">${dur(s.active_s)}</span>`, 'Generating',
           `of <span class="dur">${dur(s.duration_s)}</span> elapsed`]]
         .map(([v, k, n]) => `<div class="kpi">

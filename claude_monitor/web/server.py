@@ -359,6 +359,12 @@ def session_brief(s: Session) -> dict:
         "turns": s.user_turns,
         "api_calls": s.api_calls,
         "agents": len(s.agents),
+        # How many are working right now, not just ever — a session with 40
+        # finished agents and one live one reads very differently from 41 done.
+        "agents_running": sum(
+            1 for a in s.agents
+            if a.state(parent_live=s.is_live) == "running"
+        ),
         "tokens": u.total,
         "output_tokens": u.output_tokens,
         "peak_context": s.peak_context,

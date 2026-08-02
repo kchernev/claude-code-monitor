@@ -203,7 +203,7 @@ class Dashboard:
         t.add_column("CTX", justify="right", no_wrap=True, width=7)
         t.add_column("TOK/S", justify="right", no_wrap=True, width=6)
         t.add_column("COST", justify="right", no_wrap=True, width=9)
-        t.add_column("AG", justify="right", no_wrap=True, width=3)
+        t.add_column("AG", justify="right", no_wrap=True, width=6)
         t.add_column("CPU", justify="right", no_wrap=True, width=4)
         t.add_column("MEM", justify="right", no_wrap=True, width=7)
         t.add_column("LAST", justify="right", no_wrap=True, width=9)
@@ -226,6 +226,17 @@ class Dashboard:
             ctx = s.peak_context
             ctx_style = C_ERR if ctx > 800_000 else (C_COST if ctx > 400_000 else base or C_DIM)
 
+            # "▶2/34" while agents are working, plain total once they're not.
+            running = sum(
+                1 for a in s.agents
+                if a.state(parent_live=is_live) == "running"
+            )
+            if running:
+                ag_cell = Text(f"▶{running}/{len(s.agents)}", style=C_LIVE)
+            else:
+                ag_cell = Text(str(len(s.agents)) if s.agents else "",
+                               style=base or C_AGENT)
+
             t.add_row(
                 dot,
                 Text(_truncate(s.project, 16), style=base or C_TEXT),
@@ -235,7 +246,7 @@ class Dashboard:
                 Text(pricing.fmt_tokens(ctx), style=ctx_style),
                 Text(tps_txt, style=base or (C_TEAL if tps > 0 else C_DIM)),
                 Text(pricing.fmt_usd(s.total_cost), style=base or C_COST),
-                Text(str(len(s.agents)) if s.agents else "", style=base or C_AGENT),
+                ag_cell,
                 Text(f"{s.cpu_percent:.0f}" if is_live else "", style=base or C_TEXT),
                 Text(fmt_bytes(s.rss_bytes) if is_live else "", style=base or C_TEXT),
                 Text(fmt_ago(s.ended), style=C_DIM),
