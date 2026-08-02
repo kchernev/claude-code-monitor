@@ -561,6 +561,18 @@ footer.pagefoot{display:flex;justify-content:space-between;color:var(--ink3);
 .insp .insp-kpis b{font-size:13.5px;color:var(--ink);margin-right:4px}
 .insp .insp-kpis b.bad{color:var(--red)}
 .insp .insp-tools .brow{padding:1px 0}
+.kpi.clickable{cursor:pointer}
+.kpi.clickable:hover{border-color:color-mix(in srgb,var(--red-bright) 45%,var(--line));
+                     box-shadow:0 3px 14px -8px rgba(220,38,38,.4)}
+.errlink{background:none;border:0;padding:0;font:inherit;color:var(--red);
+         cursor:pointer;font-size:12px}
+.errlink:hover{text-decoration:underline}
+.errlink b{margin-right:4px}
+.errpre{margin:6px 0 0;font-family:var(--mono);font-size:11px;line-height:1.5;
+  background:color-mix(in srgb,var(--red-bright) 7%,var(--panel2));
+  border-left:3px solid var(--red-bright);border-radius:6px;padding:8px 10px;
+  white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow-y:auto;
+  color:var(--ink2)}
 
 /* compact stats strip on the agents pages */
 .agstats{display:grid;

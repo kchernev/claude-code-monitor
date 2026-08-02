@@ -1021,6 +1021,76 @@ def create_app(claude_dir: Optional[Path] = None, *,
             "agents": rows,
         })
 
+    @app.route("/api/workflows/<sid>/<wfid>/errors")
+    def api_workflow_errors(sid: str, wfid: str):
+        """The actual failed tool calls — command, error text, which agent.
+
+        Error content is not indexed (it would bloat the cache for data
+        that's rarely read), so this re-reads the workflow's transcripts on
+        demand, pairing each is_error tool_result with its tool_use.
+        """
+        if not _WF_ID_RE.match(wfid):
+            return jsonify({"error": "bad workflow id"}), 404
+        s = store.session(sid)
+        if s is None:
+            return jsonify({"error": "session not found"}), 404
+        agents = [a for a in s.agents if a.workflow_id == wfid]
+        if not agents:
+            return jsonify({"error": "workflow not found"}), 404
+        base = _session_base(s.session_id)
+        if base is None:
+            return jsonify({"errors": [], "total": 0})
+        wfdir = base / "subagents" / "workflows" / wfid
+        topics = {a.agent_id: a.topic for a in agents}
+
+        def result_text(content) -> str:
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(
+                    b.get("text") or "" for b in content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            return str(content or "")
+
+        errors: List[dict] = []
+        for af in sorted(wfdir.glob("agent-*.jsonl")):
+            aid = af.stem.replace("agent-", "", 1)
+            pending: Dict[str, tuple] = {}
+            seen: set = set()
+            for rec, _off in iter_records(af):
+                msg = rec.get("message") or {}
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                rtype = rec.get("type")
+                if rtype == "assistant":
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "tool_use":
+                            pending[b.get("id") or ""] = (
+                                b.get("name") or "?", b.get("input"))
+                elif rtype == "user":
+                    for b in content:
+                        if (isinstance(b, dict)
+                                and b.get("type") == "tool_result"
+                                and b.get("is_error")):
+                            tid = b.get("tool_use_id") or ""
+                            if tid in seen:   # resume replays
+                                continue
+                            seen.add(tid)
+                            name, inp = pending.get(tid, ("?", None))
+                            primary, _sub = _tool_call_text(name, inp)
+                            errors.append({
+                                "agent_id": aid,
+                                "agent": topics.get(aid, aid[:8]),
+                                "ts": rec.get("timestamp"),
+                                "tool": name,
+                                "input": primary,
+                                "error": result_text(b.get("content"))[:2500],
+                            })
+        errors.sort(key=lambda e: e["ts"] or "")
+        return jsonify({"errors": errors[-200:], "total": len(errors)})
+
     # -- misc -------------------------------------------------------------
     @app.route("/api/reindex", methods=["POST"])
     def api_reindex():

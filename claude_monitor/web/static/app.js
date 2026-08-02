@@ -1597,6 +1597,35 @@ views.workflows = async () => {
   wireWindow($('#view'));
 };
 
+// ── details persistence across silent re-renders ──────────────────────
+// The 12s live refresh replaces the view's DOM wholesale, which used to slam
+// shut any <details> the user was reading and reset its scroll. Views that
+// re-render live tag their collapsibles with data-key and bracket the render
+// with capture/restore.
+function captureDetails(sameView) {
+  const keep = {};
+  if (sameView) {
+    $$('#view details[data-key]').forEach(el => {
+      keep[el.dataset.key] = {
+        open: el.open,
+        scroll: (el.querySelector('pre') || {}).scrollTop || 0,
+      };
+    });
+  }
+  return keep;
+}
+function restoreDetails(keep) {
+  $$('#view details[data-key]').forEach(el => {
+    const k = keep[el.dataset.key];
+    if (!k) return;
+    el.open = k.open;
+    if (k.open) {
+      const pre = el.querySelector('pre');
+      if (pre) pre.scrollTop = k.scroll;
+    }
+  });
+}
+
 // ── workflow debugger ─────────────────────────────────────────────────
 
 const WF_COLORS = { done: 'var(--vio)', running: 'var(--gold)',
@@ -1683,17 +1712,21 @@ function wfInspectorHTML(a, d) {
       <span><b class="num">${usd(a.cost)}</b> cost</span>
       <span><b class="num">${tok(a.tokens)}</b> tokens</span>
       <span><b class="num">${a.api_calls}</b> calls</span>
-      <span><b class="num${a.tool_errors ? ' bad' : ''}">${a.tool_errors}</b> tool errors</span>
+      ${a.tool_errors
+        ? `<button type="button" class="errlink" data-erragent="${esc(a.id)}">
+            <b class="num bad">${a.tool_errors}</b> tool errors →</button>`
+        : '<span><b class="num">0</b> tool errors</span>'}
     </div>
     ${toolsTotal ? `<div class="insp-tools">${barList(Object.entries(a.tools)
       .sort((x, y) => y[1] - x[1]).slice(0, 6)
       .map(([n, c]) => ({ label: n, value: c, text: String(c) })))}</div>` : ''}
-    <details class="dfile" style="margin-top:10px">
+    <details class="dfile" data-key="prompt" style="margin-top:10px">
       <summary>Prompt <span class="mut">· ${(a.prompt || '').length} chars</span></summary>
       <pre class="cmt-body" style="margin:0;border-radius:0;max-height:300px;overflow:auto">${
         esc(a.prompt || '—')}</pre>
     </details>
-    <details class="dfile" style="margin-top:8px" ${a.result_full ? 'open' : ''}>
+    <details class="dfile" data-key="result" style="margin-top:8px" ${
+      a.result_full ? 'open' : ''}>
       <summary>Result${looksJson ? ' <span class="mut">· structured</span>' : ''}</summary>
       <pre class="cmt-body${looksJson ? ' json' : ''}"
         style="margin:0;border-radius:0;max-height:420px;overflow:auto">${
@@ -1701,7 +1734,34 @@ function wfInspectorHTML(a, d) {
     </details>`;
 }
 
+async function openWfErrors(sid, wfid, agentId) {
+  const m = openModal('Tool errors');
+  let d;
+  try {
+    d = await api(`/api/workflows/${sid}/${wfid}/errors`);
+  } catch (e) {
+    if ($('#modal') === m) $('#mBody').innerHTML =
+      `<div class="empty"><b>Couldn't load errors</b>${esc(e.message)}</div>`;
+    return;
+  }
+  if ($('#modal') !== m) return;
+  let list = d.errors;
+  if (agentId) list = list.filter(e => e.agent_id === agentId);
+  $('#mMeta').textContent = `${list.length} error${list.length === 1 ? '' : 's'}${
+    agentId ? ' · this agent' : ` across the workflow`}`;
+  $('#mBody').innerHTML = list.map(e => `<div class="tcall">
+      <div class="tct"><span>${dt(e.ts)}</span>
+        <span class="tag vio">${esc(e.tool)}</span>
+        <span class="tag" title="${esc(e.agent)}">${esc(e.agent.slice(0, 44))}</span></div>
+      ${e.input ? `<code>${esc(e.input)}</code>` : ''}
+      <pre class="errpre">${esc(e.error || '(no error text recorded)')}</pre>
+    </div>`).join('') ||
+    '<div class="empty"><b>No errors found</b>Nothing recorded for this scope.</div>';
+}
+
 views.workflow = async (params, sid, wfid) => {
+  const viewKey = `wf:${sid}/${wfid}`;
+  const keep = captureDetails($('#view').dataset.viewkey === viewKey);
   const d = await api(`/api/workflows/${sid}/${wfid}`);
   const agents = d.agents;
   const sel = params.get('a')
@@ -1738,8 +1798,10 @@ views.workflow = async (params, sid, wfid) => {
          [usd(d.cost), 'Cost', `${usd(d.cost / (c.total || 1))} avg / agent`],
          [tok(d.tokens), 'Tokens', `${tok(d.output_tokens)} output`],
          [`<span class="${d.tool_errors ? 'gdel' : ''}">${d.tool_errors}</span>`,
-          'Tool errors', 'across all agents']]
-        .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
+          'Tool errors', d.tool_errors ? 'click to inspect →' : 'across all agents',
+          d.tool_errors ? 'wfErrTile' : '']]
+        .map(([v, k, n, tid]) => `<div class="kpi${tid ? ' clickable' : ''}"${
+          tid ? ` id="${tid}" role="button" tabindex="0"` : ''}><div class="k">${k}</div>
           <div class="v">${v}</div>
           <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
     </div>
@@ -1768,18 +1830,35 @@ views.workflow = async (params, sid, wfid) => {
       <div class="ch"><h2>Script</h2><span class="meta">${esc(d.name)}.js · ${
         (d.script.length / 1024).toFixed(1)}KB${d.when_to_use
         ? ` · ${esc(d.when_to_use.slice(0, 90))}` : ''}</span></div>
-      <div class="cb"><details class="dfile"><summary>Show the workflow script</summary>
+      <div class="cb"><details class="dfile" data-key="script">
+        <summary>Show the workflow script</summary>
         <pre class="cmt-body" style="margin:0;border-radius:0;max-height:560px;overflow:auto">${
           esc(d.script)}</pre></details></div>
     </div></section>` : ''}`;
 
   hydrateTips($('#view'));
   concChart($('#wfconc'), agents, t0, t1);
+  const wireErr = () => $$('#wfinsp .errlink').forEach(b =>
+    b.addEventListener('click', () =>
+      openWfErrors(sid, wfid, b.dataset.erragent)));
   const paint = aid => {
     $('#wfinsp').innerHTML =
       wfInspectorHTML(agents.find(x => x.id === aid), d);
+    wireErr();
   };
   paint(sel);
+  // Re-renders every 12s while live: hand back the collapsibles as the
+  // reader left them, scroll position included.
+  $('#view').dataset.viewkey = viewKey;
+  restoreDetails(keep);
+  const errTile = $('#wfErrTile');
+  if (errTile) {
+    const openErrs = () => openWfErrors(sid, wfid);
+    errTile.addEventListener('click', openErrs);
+    errTile.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openErrs(); }
+    });
+  }
   $$('.wfg-row[data-aid]').forEach(el => {
     const pick = () => {
       $$('.wfg-row.sel').forEach(x => x.classList.remove('sel'));
@@ -2158,7 +2237,8 @@ function renderCommitDetail(host, c) {
       <span><b class="gadd">+${f.add.toLocaleString()}</b> <b class="gdel">−${
         f.del.toLocaleString()}</b></span></div>`).join('');
   const diffs = (c.patch || []).map((s, i) => `
-    <details class="dfile"${(c.patch.length === 1 && !s.truncated) ? ' open' : ''}>
+    <details class="dfile" data-key="diff:${esc(s.file)}"${
+      (c.patch.length === 1 && !s.truncated) ? ' open' : ''}>
       <summary><code>${esc(s.file)}</code>${
         s.truncated ? '<span class="mut"> · truncated</span>' : ''}</summary>
       <pre class="diff">${s.text.split('\n').map(l => {
@@ -2189,6 +2269,8 @@ function renderCommitDetail(host, c) {
 }
 
 async function gitRepoView(params, rid) {
+  const viewKey = `repo:${rid}`;
+  let pendingRestore = captureDetails($('#view').dataset.viewkey === viewKey);
   const d = await api(`/api/git/repo/${rid}`);
   const sel = params.get('c') || (d.commits[0] && d.commits[0].sha) || '';
   const st = d.stats;
@@ -2253,10 +2335,14 @@ async function gitRepoView(params, rid) {
     </section>`;
 
   hydrateTips($('#view'));
+  $('#view').dataset.viewkey = viewKey;
   const detail = $('#gdetail');
   const load = async sha => {
     try {
       renderCommitDetail(detail, await api(`/api/git/repo/${rid}/commits/${sha}`));
+      // Only the silent re-render restores; a user picking another commit
+      // starts from that commit's defaults.
+      if (pendingRestore) { restoreDetails(pendingRestore); pendingRestore = null; }
     } catch (e) {
       detail.innerHTML = `<div class="empty"><b>Couldn't load commit</b>${esc(e.message)}</div>`;
     }
