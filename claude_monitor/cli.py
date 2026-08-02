@@ -825,6 +825,7 @@ def cmd_web(console: Console, args) -> int:
             )
         )
 
+    app.config["GITMON"].start()
     n = len(store.sessions())
     url = f"http://{args.host}:{args.port}"
     console.print(
@@ -845,6 +846,7 @@ def cmd_web(console: Console, args) -> int:
         # Persist whatever the throttled background saves have not written yet,
         # so the next start doesn't re-parse work already done.
         store.stop()
+        app.config["GITMON"].stop()
         store.corpus.save_cache()
     return 0
 

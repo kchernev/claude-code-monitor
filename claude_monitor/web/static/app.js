@@ -515,6 +515,95 @@ function heatmap(cells) {
   return html;
 }
 
+/** Dual-series git chart: committed lines (violet area, steps up at commits)
+    and uncommitted WIP (green line, gaps where the monitor wasn't sampling),
+    with a diamond marker per commit on the baseline. rows share one t grid. */
+function gitChart(host, rows, commits, opts = {}) {
+  const W = host.clientWidth || 900, H = opts.height || 230;
+  const pad = { t: 10, r: 8, b: 24, l: 52 };
+  host.innerHTML = '';
+  if (!rows.length) { host.innerHTML = '<div class="empty">No data</div>'; return; }
+  const x0 = opts.start, x1 = opts.end;
+  const mx = Math.max(...rows.map(r => Math.max(r.wip || 0, r.committed || 0)), 10);
+  const sc = niceScale(mx);
+  const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H }, host);
+  const X = t => pad.l + (x1 === x0 ? 0 : (t - x0) / (x1 - x0)) * (W - pad.l - pad.r);
+  const Y = v => H - pad.b - (v / sc.max) * (H - pad.t - pad.b);
+  for (const v of sc.ticks) {
+    const y = Y(v);
+    svg('line', { class: 'grid-line', x1: pad.l, x2: W - pad.r, y1: y, y2: y,
+                  'stroke-dasharray': v === 0 ? '' : '3 5' }, s);
+    const t = svg('text', { class: 'axis-t', x: 4, y: y + 3 }, s);
+    t.textContent = tok(v);
+  }
+  const fmtT = ts => new Date(ts * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  [[x0, 'start'], [(x0 + x1) / 2, 'middle'], [x1, 'end']].forEach(([tv, pos]) => {
+    const t = svg('text', { class: 'axis-t', x: X(tv), y: H - 6,
+      'text-anchor': pos }, s);
+    t.textContent = fmtT(tv);
+  });
+
+  // committed area
+  const cd = rows.map((r, i) =>
+    `${i ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.committed).toFixed(1)}`).join('');
+  const gid = 'gc' + (++gradSeq);
+  const defs = svg('defs', {}, s);
+  const grad = svg('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+  svg('stop', { offset: 0, 'stop-color': '#7b5cfa', 'stop-opacity': .2 }, grad);
+  svg('stop', { offset: 1, 'stop-color': '#7b5cfa', 'stop-opacity': 0 }, grad);
+  svg('path', { d: `${cd}L${X(x1)},${H - pad.b}L${X(x0)},${H - pad.b}Z`,
+                fill: `url(#${gid})` }, s);
+  svg('path', { class: 'ln', d: cd, stroke: 'var(--vio)' }, s);
+
+  // WIP line — broken where wip is null, so downtime reads as downtime
+  let wd = '', pen = false;
+  for (const r of rows) {
+    if (r.wip == null) { pen = false; continue; }
+    wd += `${pen ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.wip).toFixed(1)}`;
+    pen = true;
+  }
+  if (wd) svg('path', { class: 'ln', d: wd, stroke: '#16a34a' }, s);
+
+  // commit markers
+  const yb = H - pad.b;
+  for (const c of commits) {
+    const x = X(c.t);
+    const m = svg('path', {
+      d: `M${x} ${yb - 5}L${x + 4} ${yb}L${x} ${yb + 5}L${x - 4} ${yb}Z`,
+      fill: 'var(--vio)', stroke: 'var(--card)', 'stroke-width': 1,
+      tabindex: 0,
+    }, s);
+    bindTip(m, `${c.repo} ${c.hash}\n${c.subject.slice(0, 70)}\n+${
+      c.add.toLocaleString()} lines · ${fmtT(c.t)}`);
+  }
+
+  // crosshair
+  const hit = svg('rect', { x: pad.l, y: pad.t, width: W - pad.l - pad.r,
+    height: H - pad.t - pad.b, fill: 'transparent' }, s);
+  const cross = svg('line', { class: 'grid-line', y1: pad.t, y2: yb, opacity: 0 }, s);
+  hit.addEventListener('mousemove', e => {
+    const bb = s.getBoundingClientRect();
+    const px = (e.clientX - bb.left) * (W / bb.width);
+    let best = rows[0], bd = Infinity;
+    for (const r of rows) {
+      const dd = Math.abs(X(r.t) - px);
+      if (dd < bd) { bd = dd; best = r; }
+    }
+    cross.setAttribute('x1', X(best.t)); cross.setAttribute('x2', X(best.t));
+    cross.setAttribute('opacity', 1);
+    tipEl.textContent = `${fmtT(best.t)}\nWIP ${best.wip == null ? '—'
+      : best.wip.toLocaleString() + ' lines'}\ncommitted ${
+      best.committed.toLocaleString()} lines`;
+    tipEl.classList.add('on');
+    tipEl.style.left = Math.min(e.clientX + 13, innerWidth - 220) + 'px';
+    tipEl.style.top = (e.clientY - 58) + 'px';
+  });
+  hit.addEventListener('mouseleave', () => {
+    cross.setAttribute('opacity', 0); hideTip();
+  });
+}
+
 // ── status helpers ────────────────────────────────────────────────────
 function sessStatus(s) {
   if (s.live) return { cls: 'live', label: 'Live' };
@@ -655,6 +744,7 @@ const PAGE = {
   agents:    { title: 'Agents',    skel: () => SKELETONS.card() + SKELETONS.rows(10) },
   agent:     { title: 'Agent',     skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   workflows: { title: 'Workflows', skel: () => SKELETONS.card() + SKELETONS.card() },
+  git:       { title: 'Git',       skel: () => SKELETONS.tiles(4) + SKELETONS.card() },
   cost:      { title: 'Cost',      skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   tools:     { title: 'Tools',     skel: () => SKELETONS.card() },
 };
@@ -1289,6 +1379,130 @@ views.workflows = async () => {
   wireWindow($('#view'));
 };
 
+// ── git view ──────────────────────────────────────────────────────────
+const GIT_RANGES = [[900, '15m'], [3600, '1h'], [14400, '4h'], [86400, '24h']];
+
+views.git = async (params) => {
+  const rng = +(params.get('range') || 3600);
+  const repo = params.get('repo') || 'all';
+  const [d, h] = await Promise.all([
+    api('/api/git'),
+    api('/api/git/history', { range: rng, repo }),
+  ]);
+  const t = d.totals;
+  const scoped = repo !== 'all' ? d.repos.find(r => r.id === repo) : null;
+
+  const cards = d.repos.map(r => {
+    const st = r.stats;
+    const wip = st ? st.wip : 0;
+    const seg = (v, c) => wip && v > 0
+      ? `<i style="width:${(100 * v / wip).toFixed(1)}%;background:${c}"></i>` : '';
+    const files = (st ? st.changed : []).slice(0, 6).map(f => `
+      <div class="gfile"><span class="fp" title="${esc(f.file)}">${
+        esc(f.file.split('/').slice(-2).join('/'))}</span>
+        <span><b class="gadd">+${f.add.toLocaleString()}</b> <b class="gdel">−${
+        f.del.toLocaleString()}</b></span></div>`).join('');
+    const commits = (st ? st.commits : []).slice(0, 3).map(c => `
+      <div class="gcommit"><code>${esc(c.hash)}</code>
+        <span class="cs" title="${esc(c.subject)}">${esc(c.subject)}</span>
+        <span class="dur">${ago(new Date(c.t * 1000).toISOString())}</span></div>`).join('');
+    const upstream = st && st.ahead != null
+      ? ` · <span class="num">↑${st.ahead}${st.behind ? ` ↓${st.behind}` : ''}</span>`
+      : '';
+    const lastCommit = st && st.commits.length
+      ? ago(new Date(st.commits[0].t * 1000).toISOString()) : '—';
+    return `<div class="card gcard${repo === r.id ? ' scoped' : ''}">
+      <div class="ch">
+        <div><h2>${avatar(r.name)} ${esc(r.name)}
+          ${r.live ? `<span class="st live" style="margin-left:6px"><i></i>${
+            r.live} live</span>` : ''}</h2>
+          <p class="sub num">${st ? `${esc(st.branch)}${upstream} · ` : ''}last commit ${
+            lastCommit}</p></div>
+        <button type="button" class="btn scope" data-repo="${esc(r.id)}"
+          title="Scope the chart to this repo">${repo === r.id ? 'Unscope ✕' : 'Chart'}</button>
+      </div>
+      <div class="cb">
+        <div class="gwip">
+          <span class="num" style="font-weight:800;font-size:1.05rem">${
+            st ? wip.toLocaleString() : '—'}</span>
+          <span class="mut">uncommitted lines</span>
+          <span class="spk">${sparkSVG((r.spark || []).map(p => p[1]), 90, 24,
+            '#16a34a')}</span>
+        </div>
+        ${st && wip ? `<div class="wipbar" title="staged ${st.staged_add} · unstaged ${
+            st.unstaged_add} · untracked ${st.untracked_lines}">
+          ${seg(st.staged_add, 'var(--vio)')}${seg(st.unstaged_add, 'var(--gold)')}${
+            seg(st.untracked_lines, '#38bdf8')}</div>` :
+          st ? '<div class="mut" style="font-size:12px">Working tree clean</div>' :
+          '<div class="mut" style="font-size:12px">Not sampled yet…</div>'}
+        ${files ? `<div class="gfiles">${files}</div>` : ''}
+        ${commits ? `<div class="gcommits">${commits}</div>` : ''}
+        <div class="gmeta">
+          <span>${r.sessions} session${r.sessions === 1 ? '' : 's'} · ${
+            usd(r.cost)} · ${st ? `${st.commits_today} commits today` : '…'}</span>
+          <a href="#/sessions?project=${encodeURIComponent(r.project)}">sessions →</a>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  $('#view').innerHTML = `
+    <div class="hd">
+      <div><h1>Git</h1><p class="sub">${d.repos.length} repositor${
+        d.repos.length === 1 ? 'y' : 'ies'} Claude worked in during the last ${
+        winLabel()} · sampled every ${d.interval.toFixed(0)}s</p></div>
+      <div class="right">${windowPicker()}</div>
+    </div>
+
+    <div class="kpis">
+      ${[[t.wip.toLocaleString(), 'Uncommitted lines',
+          `${t.staged.toLocaleString()} staged · ${t.unstaged.toLocaleString()} unstaged · ${
+            t.untracked.toLocaleString()} untracked`],
+         [t.committed_today.toLocaleString(), 'Lines committed today',
+          `${t.commits_today} commits`],
+         [`${t.dirty}<small>/${d.repos.length}</small>`, 'Repos with WIP',
+          'uncommitted changes right now'],
+         [d.repos.reduce((a, r) => a + r.live, 0), 'Live sessions',
+          'across these repos']]
+        .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
+          <div class="v">${v}</div>
+          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
+    </div>
+
+    <section class="blk"><div class="card">
+      <div class="ch"><h2>Code written${scoped ? ` — ${esc(scoped.name)}` : ''}</h2>
+        <div class="right">${legend([['committed (window)', 'var(--vio)'],
+          ['uncommitted WIP', '#16a34a']])}
+          <div class="pills" id="gitRange" role="group" aria-label="Chart range">
+            ${GIT_RANGES.map(([v, l]) =>
+              `<button data-r="${v}" class="${v === rng ? 'on' : ''}">${l}</button>`).join('')}
+          </div></div></div>
+      <div class="cb"><div id="gitChart"></div>
+        <p class="mut" style="font-size:.74rem;margin:10px 0 0">◆ one diamond per
+          commit — hover for hash and subject. The WIP line starts when the
+          monitor starts; committed lines come from git history.</p></div>
+    </div></section>
+
+    <div class="gitgrid">${cards ||
+      '<div class="empty"><b>No repositories found</b>No session in this window ran inside a git repository.</div>'}</div>`;
+
+  hydrateTips($('#view'));
+  wireWindow($('#view'));
+  gitChart($('#gitChart'), h.points, h.commits,
+           { start: h.start, end: h.end, height: 230 });
+  const setP = (k, v, def) => {
+    const p = new URLSearchParams(location.hash.split('?')[1] || '');
+    v === def ? p.delete(k) : p.set(k, v);
+    history.replaceState(null, '', '#/git' + (p.toString() ? '?' + p : ''));
+    route(true);
+  };
+  $$('#gitRange button').forEach(b =>
+    b.addEventListener('click', () => setP('range', b.dataset.r, '3600')));
+  $$('.gcard .scope').forEach(b =>
+    b.addEventListener('click', () =>
+      setP('repo', b.dataset.repo === repo ? 'all' : b.dataset.repo, 'all')));
+};
+
 // severity → color for plan-limit bars (bright variants; text uses AA inks)
 const limitColor = l =>
   (l.severity !== 'normal' || l.percent >= 90) ? 'var(--red-bright)'
@@ -1656,7 +1870,7 @@ fetchPlan();
 setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
-const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows']);
+const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows', 'git']);
 setInterval(() => {
   const page = (location.hash.slice(1) || '/overview')
     .split('?')[0].split('/').filter(Boolean)[0] || 'overview';

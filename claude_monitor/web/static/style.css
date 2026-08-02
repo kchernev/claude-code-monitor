@@ -433,6 +433,38 @@ code{font-family:var(--mono);font-size:.86em;background:var(--panel2);padding:2p
 footer.pagefoot{display:flex;justify-content:space-between;color:var(--ink3);
                 font-size:11.5px;margin-top:20px;gap:14px;flex-wrap:wrap}
 
+/* ══ GIT PAGE ═══════════════════════════════════════════════════════ */
+.gitgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));
+         gap:16px;margin-top:16px}
+.gcard.scoped{outline:2px solid var(--vio);outline-offset:-1px}
+.gcard h2{display:flex;align-items:center;gap:8px}
+.gcard .av{width:22px;height:22px;font-size:11px}
+.gwip{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.gwip .spk{margin-left:auto}
+.wipbar{display:flex;height:8px;border-radius:99px;overflow:hidden;
+        background:var(--panel2);margin-bottom:10px}
+.wipbar i{display:block;height:100%}
+.gfiles{border-top:1px solid var(--line);padding-top:8px;margin-top:2px}
+.gfile{display:flex;justify-content:space-between;gap:10px;
+       font-family:var(--mono);font-size:11.5px;padding:2px 0;
+       font-variant-numeric:tabular-nums}
+.gfile .fp{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+           color:var(--ink2)}
+.gadd{color:var(--green);font-weight:600}
+.gdel{color:var(--red);font-weight:600}
+.gcommits{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}
+.gcommit{display:flex;align-items:baseline;gap:8px;font-size:12px;padding:2px 0}
+.gcommit code{font-family:var(--mono);font-size:11px;color:var(--vio-text);
+              background:var(--panel2);padding:1px 5px;border-radius:4px;flex:none}
+.gcommit .cs{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+             color:var(--ink2);flex:1}
+.gcommit .dur{flex:none}
+.gmeta{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+       border-top:1px solid var(--line);margin-top:10px;padding-top:9px;
+       font-size:12px;color:var(--ink3)}
+.gmeta a{color:var(--vio-text);text-decoration:none;font-weight:600;flex:none}
+.gmeta a:hover{text-decoration:underline}
+
 section.blk{margin-top:16px}
 
 @media(max-width:980px){

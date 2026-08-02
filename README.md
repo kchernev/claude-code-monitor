@@ -78,6 +78,10 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
   directory are disambiguated by recency.
 - **Cache economics** — hit rate, 5m/1h write split, and the counterfactual bill
   if every cached token were repriced at the full input rate.
+- **Git activity** — repos are discovered from session working directories and
+  sampled with read-only `git` commands: uncommitted lines by tier, lines
+  committed today, ahead/behind, changed files by churn, recent commits.
+  Sampling cadence tiers by recency (live repos every 5s, idle ones rarely).
 
 <details>
 <summary><b>Web UI pages</b></summary>
@@ -92,6 +96,7 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
 | **Agents** | Log-scale cost distribution with percentiles, breakdown by type, sortable run table |
 | **Agent** | The exact prompt it was given, what it returned, tools used, cost |
 | **Workflows** | Gantt view of each fan-out — one bar per agent, so parallelism is visible |
+| **Git** | Live git state of every repo Claude worked in — WIP lines (staged/unstaged/untracked), committed vs uncommitted chart with commit markers, per-repo files & commits |
 | **Cost** | Counterfactual, daily spend, per-project and per-model tables with rates |
 | **Tools** | Main-thread vs subagent split per tool |
 
@@ -177,6 +182,7 @@ claude_monitor/
   parser.py      incremental JSONL parser + on-disk cache + dedup
   analytics.py   aggregation: cost, velocity, workflows, cache, economics
   resources.py   process discovery and PID→session attribution
+  gitmon.py      git sampling for repos discovered from sessions
   dashboard.py   live rich TUI
   report.py      standalone HTML report
   cli.py         argparse entry point

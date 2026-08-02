@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 from flask import Flask, jsonify, request
 
 from .. import analytics, pricing
+from ..gitmon import GitMonitor
 from ..models import AgentRun, Session, _distill_topic
 from ..parser import Corpus
 from ..resources import ResourceMonitor, system_snapshot
@@ -481,6 +482,9 @@ def create_app(claude_dir: Optional[Path] = None, *,
     app.config["ALLOW_NETWORK"] = allow_network
     store = DataStore(claude_dir=claude_dir)
     app.config["STORE"] = store
+    # Watches the repos the sessions worked in; started alongside the store.
+    gitmon = GitMonitor(store)
+    app.config["GITMON"] = gitmon
     install_origin_guard(app)
 
     # -- frontend ---------------------------------------------------------
@@ -840,6 +844,19 @@ def create_app(claude_dir: Optional[Path] = None, *,
             })
         return jsonify({"workflows": out})
 
+    # -- git --------------------------------------------------------------
+    @app.route("/api/git")
+    def api_git():
+        return jsonify(gitmon.snapshot(days=request.args.get("days", type=int)))
+
+    @app.route("/api/git/history")
+    def api_git_history():
+        rng = max(900, min(request.args.get("range", type=int) or 3600, 86400))
+        repo = (request.args.get("repo") or "all").strip()
+        return jsonify(gitmon.history(
+            repo, rng, days=request.args.get("days", type=int)
+        ))
+
     # -- misc -------------------------------------------------------------
     @app.route("/api/reindex", methods=["POST"])
     def api_reindex():
@@ -1124,4 +1141,5 @@ def serve(
     # on a server that reads your whole transcript history.
     app = create_app(claude_dir=claude_dir, allow_network=allow_network)
     app.config["STORE"].load_initial()
+    app.config["GITMON"].start()
     app.run(host=host, port=port, threaded=True, use_reloader=False)
