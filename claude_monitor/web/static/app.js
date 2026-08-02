@@ -1238,18 +1238,13 @@ views.session = async (params, sid) => {
   }
 };
 
-/** One slim card for the agents pages: cost histogram, percentiles and the
-    by-type split side by side instead of two half-empty full-height cards. */
+/** One slim card for the agents pages: cost histogram and the by-type
+    split side by side instead of two half-empty full-height cards. */
 function agentStatsHTML(d, project) {
   return `<section class="blk"><div class="card agstats">
     <div class="as-col">
       <div class="as-t">Cost per run<span class="meta">log-spaced bins</span></div>
       <div id="dist"></div>
-    </div>
-    <div class="as-col as-pct">
-      <div class="as-t">Percentiles</div>
-      ${Object.entries(d.percentiles).map(([p, v]) =>
-        `<div class="pctrow"><span>p${p}</span><b class="num">${usd(v)}</b></div>`).join('')}
     </div>
     <div class="as-col">
       <div class="as-t">By type</div>
