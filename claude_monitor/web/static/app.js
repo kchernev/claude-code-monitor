@@ -2790,7 +2790,11 @@ async function route(silent) {
   const seg = path.split('/').filter(Boolean);
   const name = seg[0] || 'overview';
 
-  const PARENT = { session: 'sessions', agent: 'agents', workflow: 'workflows',
+  // Sessions/Agents/Workflows have no nav item of their own — they are
+  // reached through a project, so they light up Projects.
+  const PARENT = { session: 'projects', sessions: 'projects',
+                   agent: 'projects', agents: 'projects',
+                   workflow: 'projects', workflows: 'projects',
                    project: 'projects' };
   const section = PARENT[name] || name;
   $$('.nav a').forEach(a => {
