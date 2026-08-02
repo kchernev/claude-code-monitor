@@ -488,15 +488,18 @@ def create_app(claude_dir: Optional[Path] = None, *,
     install_origin_guard(app)
 
     # -- frontend ---------------------------------------------------------
-    @app.route("/")
-    def index():
+    def _asset_version() -> int:
         static = HERE / "static"
         try:
-            version = int(max(
+            return int(max(
                 (static / name).stat().st_mtime for name in ("style.css", "app.js")
             ))
         except OSError:
-            version = 0
+            return 0
+
+    @app.route("/")
+    def index():
+        version = _asset_version()
         html = (HERE / "templates" / "index.html").read_text()
         resp = app.make_response(html.replace("__V__", str(version)))
         resp.mimetype = "text/html"
@@ -609,6 +612,8 @@ def create_app(claude_dir: Optional[Path] = None, *,
             "system": system_snapshot(),
             "generation": store.generation,
             "age_s": max(0.0, time.time() - store.last_refresh),
+            # Lets an open tab notice the server was upgraded under it.
+            "asset_version": _asset_version(),
         })
 
     # -- sessions ---------------------------------------------------------

@@ -2192,6 +2192,14 @@ function drawSideSpark() {
 async function poll() {
   try {
     const d = await (await fetch('/api/live')).json();
+    // A restarted server may be serving newer assets than this tab loaded.
+    // Reload once so pills, endpoints and rendering can never disagree —
+    // navigation state lives in the URL hash, so nothing is lost.
+    if (d.asset_version && window.__ASSET_V__ &&
+        String(d.asset_version) !== String(window.__ASSET_V__)) {
+      location.reload();
+      return;
+    }
     state.live = d;
     const n = d.live.length;
     const tps = d.tps_now != null ? d.tps_now

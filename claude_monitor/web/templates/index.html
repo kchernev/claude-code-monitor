@@ -14,6 +14,10 @@
   var t = q || localStorage.getItem('cm.theme');
   if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
 })();
+// Asset version baked in at page load; the live poll compares it against the
+// server's current one and reloads when they diverge, so an open tab can't
+// keep running stale code across an upgrade.
+window.__ASSET_V__ = '__V__';
 </script>
 </head>
 <body>
