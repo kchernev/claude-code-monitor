@@ -266,9 +266,11 @@ class Dashboard:
         t.add_column("TOKENS", justify="right", no_wrap=True, width=8)
         t.add_column("TIME", justify="right", no_wrap=True, width=7)
         t.add_column("COST", justify="right", no_wrap=True, width=8)
+        t.add_column("STARTED", justify="right", no_wrap=True, width=11)
 
         if not runs:
-            t.add_row("", Text("no subagents in window", style=C_DIM), "", "", "", "", "")
+            t.add_row("", Text("no subagents in window", style=C_DIM),
+                      "", "", "", "", "", "")
 
         for a in runs:
             state = a.state(parent_live=a.session_id in live_ids)
@@ -288,6 +290,7 @@ class Dashboard:
                 Text(pricing.fmt_tokens(a.usage.total), style=style or C_TEXT),
                 Text(fmt_duration(a.duration_s), style=C_DIM),
                 Text(pricing.fmt_usd(a.cost), style=style or C_COST),
+                Text(fmt_ago(a.started), style=C_DIM),
             )
 
         n_running = sum(

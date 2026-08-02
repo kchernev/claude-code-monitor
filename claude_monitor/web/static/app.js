@@ -989,7 +989,7 @@ views.session = async (params, sid) => {
         { h: 'Type', key: 'type' }, { h: 'Model', key: 'model' },
         { h: 'Calls', key: 'calls', n: 1 }, { h: 'Tokens', key: 'tk', n: 1 },
         { h: 'Time', key: 'time', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
-        { h: 'Status', key: 'st' }],
+        { h: 'Status', key: 'st' }, { h: 'Started', key: 'when', n: 1 }],
         s.agents.map(a => ({
           _href: `#/agent/${s.id}/${a.id}`,
           topic: esc(a.topic),
@@ -998,6 +998,7 @@ views.session = async (params, sid) => {
           calls: a.api_calls, tk: tok(a.tokens),
           time: `<span class="dur">${dur(a.duration_s)}</span>`,
           cost: usd(a.cost), st: agentPill(a.state),
+          when: `<span class="dur">${ago(a.started)}</span>`,
         })))}</div></div></section>` : ''}
 
     <section class="blk grid cols2">
@@ -1151,7 +1152,8 @@ views.agent = async (params, sid, aid) => {
       ${[[usd(a.cost), 'Cost', `${a.api_calls} API calls`],
          [tok(a.tokens), 'Tokens', `${pct(a.cache_hit_rate)} cached`],
          [tok(a.output_tokens), 'Output', `${a.output_tps.toFixed(0)} tok/s`],
-         [`<span class="dur">${dur(a.duration_s)}</span>`, 'Duration', dt(a.started)],
+         [`<span class="dur">${dur(a.duration_s)}</span>`, 'Duration',
+          `started ${ago(a.started)} · ${dt(a.started)}`],
          [a.tool_errors, 'Tool errors', `${Object.values(a.tools)
            .reduce((x, y) => x + y, 0)} tool calls`]]
         .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>

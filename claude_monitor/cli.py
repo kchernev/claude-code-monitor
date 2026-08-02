@@ -659,6 +659,7 @@ def cmd_show(console: Console, args) -> int:
         at.add_column("TIME", justify="right")
         at.add_column("TOK/S", justify="right")
         at.add_column("COST", justify="right")
+        at.add_column("STARTED", justify="right", no_wrap=True)
         glyphs = {"done": ("✓", C_LIVE), "running": ("▶", C_COST), "stopped": ("⊘", C_DIM)}
         # Running first, then by cost.
         ordered = sorted(
@@ -677,6 +678,7 @@ def cmd_show(console: Console, args) -> int:
                 fmt_duration(a.duration_s),
                 f"{a.output_tps:,.0f}" if a.output_tps else "—",
                 Text(pricing.fmt_usd(a.cost), style=C_COST),
+                Text(fmt_ago(a.started), style=C_DIM),
             )
         console.print(at)
         console.print(
