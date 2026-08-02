@@ -112,23 +112,34 @@ a{color:inherit;text-decoration:none}
        background:#8f909b;transition:.15s}
 .dm[aria-checked="true"] .sw2{background:var(--gold)}
 .dm[aria-checked="true"] .sw2 i{left:18px;background:#17181c}
+.planbox{background:var(--side3);border-radius:14px;padding:12px 14px;margin-top:12px}
+.planbox .pt{display:flex;align-items:baseline;justify-content:space-between;gap:8px;
+             margin-bottom:9px}
+.planbox #planName{color:#fff;font-size:12.5px;font-weight:700}
+.planbox #planAge{font-family:var(--mono);font-size:9.5px;color:var(--side-ink3)}
+.pl{display:grid;grid-template-columns:minmax(58px,auto) 1fr 30px;gap:8px;
+    align-items:center;margin-top:6px}
+.pl .plk{font-family:var(--mono);font-size:10px;color:var(--side-ink3);
+         overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pl .plt{height:5px;border-radius:99px;background:#2c2d35;overflow:hidden}
+.pl .plt i{display:block;height:100%;border-radius:99px;min-width:2px}
+.pl .plv{font-family:var(--mono);font-size:10px;color:var(--side-ink2);
+         text-align:right;font-variant-numeric:tabular-nums}
+.pl .plr{grid-column:1/-1;font-family:var(--mono);font-size:9px;
+         color:var(--side-ink3);text-align:right;margin-top:-3px;line-height:1.3;
+         font-variant-numeric:tabular-nums}
 /* running-agents count inside the Agents column */
 .agr{color:var(--gold);font-weight:700}
-
-/* plan limits as one horizontal strip on the dashboard */
-.planstrip{display:flex;align-items:flex-start;gap:26px;padding:14px 20px 11px;
-           margin-bottom:16px;flex-wrap:wrap}
-.planstrip .pls-head{flex:none;min-width:120px;display:flex;
-                     flex-direction:column;gap:3px}
-.planstrip .pls-head h2{margin:0;font-size:14px;letter-spacing:-.01em}
-.planstrip .pls-head .meta{font-size:11px;color:var(--ink3)}
-.pls-item{flex:1;min-width:160px;max-width:320px}
-.pls-top{display:flex;justify-content:space-between;gap:10px;font-size:12px;
-         color:var(--ink2);margin-bottom:5px}
-.pls-top b{font-variant-numeric:tabular-nums}
-.pls-reset{font-family:var(--mono);font-size:9.5px;color:var(--ink3);
-           margin-top:4px;text-align:right;font-variant-numeric:tabular-nums;
-           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sideinfo{background:var(--side3);border-radius:14px;padding:13px 14px;margin-top:12px}
+.sideinfo .t{display:flex;align-items:center;gap:8px;color:var(--side-ink3);
+             font-size:12.5px;font-weight:700}
+.sideinfo.on .t{color:#7ce3b1}
+.sideinfo .t i{width:7px;height:7px;border-radius:50%;background:#4b4c55;flex:none}
+.sideinfo.on .t i{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.22)}
+.sideinfo .spark{height:26px;margin:8px 0 2px}
+.sideinfo .spark svg{width:100%;height:26px;display:block}
+.sideinfo .d{font-family:var(--mono);font-size:10.5px;color:var(--side-ink3);
+             line-height:1.75}
 .privacy{font-size:10.5px;color:var(--side-ink3);line-height:1.55;padding:12px 6px 0}
 .privacy code{font-family:var(--mono);background:var(--side3);padding:1px 5px;
               border-radius:4px}

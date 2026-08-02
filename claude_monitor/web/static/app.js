@@ -826,45 +826,27 @@ const todayChip = () => `<span class="datechip">📅 ${new Date().toLocaleDateSt
   undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</span>`;
 
 
-/** Plan limits as one horizontal strip: every limit side by side with its
-    bar and reset, instead of a tall stacked card. */
-function planStrip(plan) {
-  if (!plan || plan.available === false) return '';
-  const items = (plan.limits || []).map(l => {
-    const r = resetInfo(l);
-    return `<div class="pls-item">
-      <div class="pls-top"><span>${esc(l.label)}</span>
-        <b class="num">${l.percent}%</b></div>
-      <div class="track" style="height:6px"><div class="fill" style="width:${
-        Math.min(100, l.percent)}%;background:${limitColor(l)}"></div></div>
-      <div class="pls-reset">${r
-        ? `↻ ${r.rel}${r.abs ? ` · ${esc(r.abs)}` : ''}` : '&nbsp;'}</div>
-    </div>`;
-  }).join('');
-  const x = plan.extra;
-  const extra = x ? `<div class="pls-item pls-x">
-      <div class="pls-top"><span>Extra usage</span>
-        <b class="num">${x.enabled ? `${x.percent}%` : 'off'}</b></div>
-      <div class="track" style="height:6px"><div class="fill" style="width:${
-        Math.min(100, x.percent || 0)}%;background:var(--amber-bright)"></div></div>
-      <div class="pls-reset">${x.used.toFixed(2)} / ${x.limit.toFixed(2)} ${
-        esc(x.currency)}${x.reason === 'out_of_credits' ? ' · out of credits' : ''}</div>
-    </div>` : '';
-  return `<div class="card planstrip">
-    <div class="pls-head"><h2>Plan limits</h2>
-      <span class="meta">${esc(plan.plan)} plan${
-        plan.source === 'live' ? ' · live'
-        : plan.age_s != null ? ` · ${dur(plan.age_s)} ago` : ''}</span></div>
-    ${items || '<span class="mut" style="font-size:12.5px">No utilization data cached yet — run /usage once in Claude Code.</span>'}
-    ${extra}
-  </div>`;
-}
+// Fan-out artwork for the overview card (decorative; stats carry the info).
+const FAN_ART = `<svg viewBox="0 0 220 130" width="100%" height="100" aria-hidden="true">
+<g fill="none" stroke="var(--vio)" stroke-width="3" stroke-linecap="round" opacity=".9">
+<path d="M28 65h32"/><path d="M60 65c28 0 20-38 48-38"/>
+<path d="M60 65c20 0 15 20 35 20"/><path d="M60 65h70"/>
+<path d="M130 65c24 0 18-23 40-23" opacity=".5"/>
+<path d="M95 85c18 0 13 21 33 21" opacity=".5"/></g>
+<circle cx="24" cy="65" r="10" fill="var(--card)" stroke="var(--vio)" stroke-width="3"/>
+<circle cx="110" cy="27" r="7" fill="var(--gold)"/>
+<circle cx="132" cy="65" r="8" fill="var(--vio)"/>
+<circle cx="97" cy="85" r="6" fill="#16a34a"/>
+<circle cx="172" cy="42" r="6" fill="#d6456f"/>
+<circle cx="130" cy="106" r="5.5" fill="#38bdf8"/>
+<circle cx="110" cy="27" r="11.5" fill="none" stroke="var(--gold)" stroke-width="1.6" opacity=".4"/>
+<circle cx="132" cy="65" r="12.5" fill="none" stroke="var(--vio)" stroke-width="1.6" opacity=".4"/>
+</svg>`;
 
 views.overview = async () => {
-  const [d, live, plan] = await Promise.all([
+  const [d, live] = await Promise.all([
     api('/api/summary'),
     api('/api/live', {}, { fresh: true }),
-    api('/api/plan').catch(() => null),
   ]);
   state.summary = d;
   state.live = live;
@@ -914,17 +896,22 @@ views.overview = async () => {
     <div class="hd">
       <div><h1>${greeting()}, ${esc(d.user || 'there')} 👋</h1>
         <div class="sub">Here's what your agents are doing right now.</div></div>
-      <div class="right">
-        <button type="button" class="btn" id="rescanBtn" title="Re-parse changed transcripts">↻ Re-scan</button>
-        ${windowPicker()}${todayChip()}</div>
+      <div class="right">${windowPicker()}${todayChip()}</div>
     </div>
 
     ${alerts.length
       ? `<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">${
           alerts.join('')}</div>` : ''}
     <div class="sect">Dashboard overview</div>
-    ${planStrip(plan)}
-    <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+    <div class="hero">
+      <div class="illus">
+        <div class="cap">One orchestrator, many hands</div>
+        <div class="sub2">${t.agents.toLocaleString()} subagents fanned out in the
+          last ${winLabel()} — peak parallelism ×${d.peak_parallelism || 1}.</div>
+        ${FAN_ART}
+      </div>
+
+      <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:0">
         <div class="kpi">
           <span class="ic" style="background:color-mix(in srgb,var(--vio) 12%,transparent);color:var(--vio-text)">$</span>
           <div class="k">Actual spend</div>
@@ -945,18 +932,9 @@ views.overview = async () => {
           <div class="v">${tok(e.tokens.output)} <small>/ ${tok(t.tokens)}</small></div>
           <span class="delta warn">${(100 * e.output_share).toFixed(2)}% is new work</span>
         </div>
-        <div class="kpi">
-          <span class="ic" style="background:var(--green-bg);color:var(--green)">●</span>
-          <div class="k">Live right now</div>
-          <div class="v">${live.live.length} <small>session${
-            live.live.length === 1 ? '' : 's'}</small></div>
-          <span class="delta ${live.live.length ? 'up' : 'warn'}">${
-            live.live.length
-              ? `${Math.round(live.tps_now).toLocaleString()} tok/s · ${
-                  live.running_agents.length} agents · ${usd(live.burn_rate_hourly)}/hr`
-              : `${usd(live.spend_24h)} in the last 24h`}</span>
-        </div>
       </div>
+
+    </div>
 
     <section class="blk" style="display:grid;grid-template-columns:1fr minmax(300px,380px);gap:16px">
       <div class="card">
@@ -1024,14 +1002,6 @@ views.overview = async () => {
   hydrateTips($('#view'));
   wireTable($('#view'));
   wireWindow($('#view'));
-  const rb = $('#rescanBtn');
-  if (rb) rb.addEventListener('click', async () => {
-    rb.disabled = true;
-    rb.textContent = '↻ Scanning…';
-    try { await fetch('/api/reindex', { method: 'POST' }); } catch (e) {}
-    invalidateApi();
-    route(true);
-  });
   colChart($('#dailyBars'), daily.map(r => ({
     v: r.cost, label: r.date.slice(5),
     tip: `${r.date}\n${usd(r.cost)} · ${r.sessions} sessions`,
@@ -2201,17 +2171,80 @@ async function route(silent) {
   }
 }
 
-// ── live poll → nav badge ─────────────────────────────────────────────
-// Plan limits and live telemetry live on the dashboard now, not the sidebar;
-// the poll only keeps the Sessions badge and state.live current.
+// ── live poll → sidebar telemetry ─────────────────────────────────────
+const STREAM_KEEP = 60;
+const stream = { pts: new Array(STREAM_KEEP).fill(0) };
+
+function drawSideSpark() {
+  const host = $('#sideSpark');
+  if (!host) return;
+  const w = host.clientWidth || 180, h = 26;
+  const mx = Math.max(...stream.pts, 1);
+  const pts = stream.pts.map((v, i) =>
+    [i * w / (STREAM_KEEP - 1), 2 + (1 - v / mx) * (h - 5)]);
+  const line = smoothPath(pts, 10);
+  host.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <path d="${line}L${w} ${h}L0 ${h}Z" fill="rgba(34,197,94,.14)"/>
+    <path d="${line}" fill="none" stroke="#22c55e" stroke-width="1.6"
+      stroke-linecap="round"/></svg>`;
+}
+
 async function poll() {
   try {
     const d = await (await fetch('/api/live')).json();
     state.live = d;
+    const n = d.live.length;
+    const tps = d.tps_now != null ? d.tps_now
+      : d.live.reduce((a, s) => a + (s.output_tps || 0), 0);
+    stream.pts.push(n ? tps : 0);
+    while (stream.pts.length > STREAM_KEEP) stream.pts.shift();
+
+    $('#sideInfo').classList.toggle('on', n > 0);
+    $('#sideLive').innerHTML = n
+      ? `<i></i>${n} session${n > 1 ? 's' : ''} live`
+      : '<i></i>No sessions running';
+    $('#sideStats').innerHTML = n
+      ? `${Math.round(tps).toLocaleString()} tok/s out · ${
+          d.running_agents.length} agents<br>${usd(d.burn_rate_hourly)}/hr burn`
+      : `${usd(d.spend_24h)} spent in 24h`;
+    drawSideSpark();
+
     const badge = $('#liveBadge');
-    badge.hidden = d.live.length === 0;
-    badge.textContent = d.live.length;
+    badge.hidden = n === 0;
+    badge.textContent = n;
+    if (!state.plan) fetchPlan();
   } catch (e) { /* server restarting; retry next tick */ }
+}
+
+// ── plan & limits → sidebar ───────────────────────────────────────────
+function paintPlan(p) {
+  const box = $('#planBox');
+  if (!p || p.available === false) { box.hidden = true; return; }
+  const sev = l => (l.severity !== 'normal' || l.percent >= 90) ? '#f87171'
+    : l.percent >= 70 ? '#fbbf24' : '#22c55e';
+  $('#planName').textContent = p.plan + ' plan';
+  $('#planAge').textContent = p.source === 'live' ? 'live'
+    : p.age_s != null ? dur(p.age_s) + ' ago' : '';
+  $('#planRows').innerHTML = (p.limits || []).map(l => {
+    const r = resetInfo(l);
+    return `
+    <div class="pl" title="${esc(l.label)} — ${l.percent}% used${
+      r ? `, resets in ${r.rel}${r.abs ? ` (${r.abs})` : ''}` : ''}">
+      <span class="plk">${esc(l.label.replace(' · all models', ' all')
+        .replace('Week · ', 'Wk '))}</span>
+      <span class="plt"><i style="width:${Math.min(100, l.percent)}%;background:${
+        sev(l)}"></i></span>
+      <span class="plv">${l.percent}%</span>
+      ${r ? `<span class="plr">↻ ${r.rel}${r.abs ? ` · ${esc(r.abs)}` : ''}</span>` : ''}
+    </div>`;
+  }).join('');
+  box.hidden = false;
+}
+async function fetchPlan() {
+  try {
+    state.plan = await (await fetch('/api/plan')).json();
+    paintPlan(state.plan);
+  } catch (e) { /* server restarting; keep last */ }
 }
 
 // ── boot ──────────────────────────────────────────────────────────────
@@ -2248,6 +2281,8 @@ syncThemeBtn();
 
 poll();
 setInterval(poll, 3000);
+fetchPlan();
+setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
 const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows', 'git']);
@@ -2266,4 +2301,4 @@ setInterval(() => {
   route(true).then(() => scrollTo(0, y));
 }, 12000);
 route();
-addEventListener('resize', debounce(() => route(true), 250));
+addEventListener('resize', debounce(() => { route(true); drawSideSpark(); }, 250));
