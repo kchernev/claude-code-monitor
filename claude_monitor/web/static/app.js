@@ -1637,9 +1637,19 @@ poll();
 setInterval(poll, 3000);
 fetchPlan();
 setInterval(fetchPlan, 180000);
+// Silent refresh for the pages that show live state — otherwise the running
+// counts and status pills are a snapshot of whenever you navigated in.
+const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows']);
 setInterval(() => {
-  if (!(location.hash.slice(1) || '/overview').startsWith('/overview')) return;
+  const page = (location.hash.slice(1) || '/overview')
+    .split('?')[0].split('/').filter(Boolean)[0] || 'overview';
+  if (!LIVE_PAGES.has(page)) return;
   if (document.hidden) return;
+  // Never re-render under someone's fingers: typing in search or selecting
+  // text to copy would be wiped by the DOM swap.
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return;
+  if ((getSelection() || '').toString()) return;
   const y = scrollY;
   invalidateApi();
   route(true).then(() => scrollTo(0, y));
