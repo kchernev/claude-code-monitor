@@ -2790,7 +2790,9 @@ async function route(silent) {
   const seg = path.split('/').filter(Boolean);
   const name = seg[0] || 'overview';
 
-  const section = name === 'overview' ? 'overview' : 'projects';
+  const PARENT = { session: 'sessions', agent: 'agents', workflow: 'workflows',
+                   project: 'projects' };
+  const section = PARENT[name] || name;
   $$('.nav a').forEach(a => {
     const on = a.getAttribute('href') === '#/' + section;
     a.classList.toggle('active', on);
