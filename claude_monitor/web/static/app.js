@@ -186,7 +186,11 @@ function sparkSVG(series, w, h, color) {
 function waveChart(host, rows, opts = {}) {
   host.innerHTML = '';
   if (!rows.length) { host.innerHTML = '<div class="empty">No data</div>'; return; }
-  const W = 1000, H = opts.height || 248;
+  // Real pixel width, like every other chart. A fixed 1000-unit viewBox with
+  // preserveAspectRatio:none stretched X ~3× on a wide screen while Y stayed
+  // 1:1 — visibly distorting the value flag and every text label. The resize
+  // handler re-renders, so the width tracks the card.
+  const W = host.clientWidth || 1000, H = opts.height || 248;
   const padL = 40, padB = 24, padT = 30;
   const cum = [];
   let run = 0;
@@ -197,8 +201,7 @@ function waveChart(host, rows, opts = {}) {
   const pts = cum.map((v, i) => [X(i), Y(v)]);
   const line = smoothPath(pts);
 
-  const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H,
-                         preserveAspectRatio: 'none' }, host);
+  const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H }, host);
   const gid = 'wf' + (++gradSeq);
   const defs = svg('defs', {}, s);
   const grad = svg('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
@@ -238,7 +241,9 @@ function waveChart(host, rows, opts = {}) {
                   'stroke-dasharray': '4 4' }, s);
     svg('circle', { cx: mx, cy: my, r: 5.5, fill: 'var(--card)',
                     stroke: 'var(--vio)', 'stroke-width': 3 }, s);
-    const fw = 138, fx = Math.max(padL, Math.min(mx - fw / 2, W - fw - 10));
+    // Sized for unstretched pixels: "2026-07-30 · biggest day" in 9.5px mono
+    // is ~137px, so 138 clipped it once the X-stretch was removed.
+    const fw = 156, fx = Math.max(padL, Math.min(mx - fw / 2, W - fw - 10));
     const fy = Math.max(2, my - 50);
     const g = svg('g', { transform: `translate(${fx},${fy})` }, s);
     svg('rect', { width: fw, height: 38, rx: 10, style: 'fill:var(--tip-bg)' }, g);
