@@ -904,12 +904,12 @@ views.overview = async () => {
           alerts.join('')}</div>` : ''}
     <div class="sect">Dashboard overview</div>
     <div class="hero">
-      <div class="illus">
+      ${planCard(plan) || `<div class="illus">
         <div class="cap">One orchestrator, many hands</div>
         <div class="sub2">${t.agents.toLocaleString()} subagents fanned out in the
           last ${winLabel()} — peak parallelism ×${d.peak_parallelism || 1}.</div>
         ${FAN_ART}
-      </div>
+      </div>`}
 
       <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:0">
         <div class="kpi">
@@ -963,7 +963,6 @@ views.overview = async () => {
         ], rows)}</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:16px">
-        ${planCard(plan)}
         <div class="card">
           <div class="ch"><h2>Projects</h2><a class="meta" href="#/cost">Cost →</a></div>
           <div class="cb">${barList(foldTail(d.projects.map(p => ({
@@ -1950,80 +1949,17 @@ async function route(silent) {
   }
 }
 
-// ── live poll → sidebar telemetry ─────────────────────────────────────
-const STREAM_KEEP = 60;
-const stream = { pts: new Array(STREAM_KEEP).fill(0) };
-
-function drawSideSpark() {
-  const host = $('#sideSpark');
-  if (!host) return;
-  const w = host.clientWidth || 180, h = 26;
-  const mx = Math.max(...stream.pts, 1);
-  const pts = stream.pts.map((v, i) =>
-    [i * w / (STREAM_KEEP - 1), 2 + (1 - v / mx) * (h - 5)]);
-  const line = smoothPath(pts, 10);
-  host.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-    <path d="${line}L${w} ${h}L0 ${h}Z" fill="rgba(34,197,94,.14)"/>
-    <path d="${line}" fill="none" stroke="#22c55e" stroke-width="1.6"
-      stroke-linecap="round"/></svg>`;
-}
-
+// ── live poll → nav badge ─────────────────────────────────────────────
+// Plan limits and live telemetry live on the dashboard now, not the sidebar;
+// the poll only keeps the Sessions badge and state.live current.
 async function poll() {
   try {
     const d = await (await fetch('/api/live')).json();
     state.live = d;
-    const n = d.live.length;
-    const tps = d.tps_now != null ? d.tps_now
-      : d.live.reduce((a, s) => a + (s.output_tps || 0), 0);
-    stream.pts.push(n ? tps : 0);
-    while (stream.pts.length > STREAM_KEEP) stream.pts.shift();
-
-    $('#sideInfo').classList.toggle('on', n > 0);
-    $('#sideLive').innerHTML = n
-      ? `<i></i>${n} session${n > 1 ? 's' : ''} live`
-      : '<i></i>No sessions running';
-    $('#sideStats').innerHTML = n
-      ? `${Math.round(tps).toLocaleString()} tok/s out · ${
-          d.running_agents.length} agents<br>${usd(d.burn_rate_hourly)}/hr burn`
-      : `${usd(d.spend_24h)} spent in 24h`;
-    drawSideSpark();
-
     const badge = $('#liveBadge');
-    badge.hidden = n === 0;
-    badge.textContent = n;
-    if (!state.plan) fetchPlan();
+    badge.hidden = d.live.length === 0;
+    badge.textContent = d.live.length;
   } catch (e) { /* server restarting; retry next tick */ }
-}
-
-// ── plan & limits → sidebar ───────────────────────────────────────────
-function paintPlan(p) {
-  const box = $('#planBox');
-  if (!p || p.available === false) { box.hidden = true; return; }
-  const sev = l => (l.severity !== 'normal' || l.percent >= 90) ? '#f87171'
-    : l.percent >= 70 ? '#fbbf24' : '#22c55e';
-  $('#planName').textContent = p.plan + ' plan';
-  $('#planAge').textContent = p.source === 'live' ? 'live'
-    : p.age_s != null ? dur(p.age_s) + ' ago' : '';
-  $('#planRows').innerHTML = (p.limits || []).map(l => {
-    const r = resetInfo(l);
-    return `
-    <div class="pl" title="${esc(l.label)} — ${l.percent}% used${
-      r ? `, resets in ${r.rel}${r.abs ? ` (${r.abs})` : ''}` : ''}">
-      <span class="plk">${esc(l.label.replace(' · all models', ' all')
-        .replace('Week · ', 'Wk '))}</span>
-      <span class="plt"><i style="width:${Math.min(100, l.percent)}%;background:${
-        sev(l)}"></i></span>
-      <span class="plv">${l.percent}%</span>
-      ${r ? `<span class="plr">↻ ${r.rel}${r.abs ? ` · ${esc(r.abs)}` : ''}</span>` : ''}
-    </div>`;
-  }).join('');
-  box.hidden = false;
-}
-async function fetchPlan() {
-  try {
-    state.plan = await (await fetch('/api/plan')).json();
-    paintPlan(state.plan);
-  } catch (e) { /* server restarting; keep last */ }
 }
 
 // ── boot ──────────────────────────────────────────────────────────────
@@ -2060,8 +1996,6 @@ syncThemeBtn();
 
 poll();
 setInterval(poll, 3000);
-fetchPlan();
-setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
 const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows', 'git']);
@@ -2080,4 +2014,4 @@ setInterval(() => {
   route(true).then(() => scrollTo(0, y));
 }, 12000);
 route();
-addEventListener('resize', debounce(() => { route(true); drawSideSpark(); }, 250));
+addEventListener('resize', debounce(() => route(true), 250));
