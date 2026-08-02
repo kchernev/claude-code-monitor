@@ -1238,6 +1238,41 @@ views.session = async (params, sid) => {
   }
 };
 
+/** One slim card for the agents pages: cost histogram, percentiles and the
+    by-type split side by side instead of two half-empty full-height cards. */
+function agentStatsHTML(d, project) {
+  return `<section class="blk"><div class="card agstats">
+    <div class="as-col">
+      <div class="as-t">Cost per run<span class="meta">log-spaced bins</span></div>
+      <div id="dist"></div>
+    </div>
+    <div class="as-col as-pct">
+      <div class="as-t">Percentiles</div>
+      ${Object.entries(d.percentiles).map(([p, v]) =>
+        `<div class="pctrow"><span>p${p}</span><b class="num">${usd(v)}</b></div>`).join('')}
+    </div>
+    <div class="as-col">
+      <div class="as-t">By type</div>
+      ${barList(d.by_type.map((b, i) => ({
+        label: b.key, value: b.cost, color: SERIES[i % SERIES.length],
+        text: usd(b.cost), sub: `${b.agents}`,
+        href: `#/agents?${project
+          ? `project=${encodeURIComponent(project)}&` : ''}type=${
+          encodeURIComponent(b.key)}`,
+        tip: `${b.agents} runs · ${tok(b.tokens)} tokens\n${
+          b.api_calls.toLocaleString()} calls`,
+      })))}
+    </div>
+  </div></section>`;
+}
+
+function agentStatsChart(d) {
+  colChart($('#dist'), d.distribution.map(b => ({
+    v: b.count, label: usd(b.lo),
+    tip: `${usd(b.lo)} – ${usd(b.hi)}\n${b.count} agents`,
+  })), { height: 96, fmt: v => Math.round(v) });
+}
+
 /** Top level of the Agents section: one card per project. Clicking drills
     into that project's sessions → workflows → agents. */
 async function agentsProjectsView(params) {
@@ -1271,23 +1306,7 @@ async function agentsProjectsView(params) {
       </div>
     </div>
 
-    <section class="grid cols2">
-      <div class="card"><div class="ch"><h2>Cost per run</h2>
-        <span class="meta">log-spaced bins · all projects</span></div>
-        <div class="cb"><div id="dist"></div>
-        <dl class="kv" style="margin-top:12px">
-          ${Object.entries(d.percentiles).map(([p, v]) =>
-            `<dt>p${p}</dt><dd>${usd(v)}</dd>`).join('')}
-        </dl></div></div>
-      <div class="card"><div class="ch"><h2>By type</h2></div>
-        <div class="cb">${barList(d.by_type.map((b, i) => ({
-          label: b.key, value: b.cost, color: SERIES[i % SERIES.length],
-          text: usd(b.cost), sub: `${b.agents}`,
-          href: `#/agents?type=${encodeURIComponent(b.key)}`,
-          tip: `${b.agents} runs · ${tok(b.tokens)} tokens\n${
-            b.api_calls.toLocaleString()} calls`,
-        })))}</div></div>
-    </section>
+    ${agentStatsHTML(d, '')}
 
     <div class="gitgrid">${rows.map(p => `
       <a class="card projcard" href="#/agents?project=${encodeURIComponent(p.name)}">
@@ -1308,10 +1327,7 @@ async function agentsProjectsView(params) {
 
   hydrateTips($('#view'));
   wireWindow($('#view'));
-  colChart($('#dist'), d.distribution.map(b => ({
-    v: b.count, label: usd(b.lo),
-    tip: `${usd(b.lo)} – ${usd(b.hi)}\n${b.count} agents`,
-  })), { height: 138, fmt: v => Math.round(v) });
+  agentStatsChart(d);
   const qi = $('#q');
   qi.addEventListener('input', debounce(() => {
     if (!qi.value) return;
@@ -1428,23 +1444,7 @@ views.agents = async (params) => {
       </div>
     </div>
 
-    <section class="grid cols2">
-      <div class="card"><div class="ch"><h2>Cost per run</h2>
-        <span class="meta">log-spaced bins</span></div>
-        <div class="cb"><div id="dist"></div>
-        <dl class="kv" style="margin-top:12px">
-          ${Object.entries(d.percentiles).map(([p, v]) =>
-            `<dt>p${p}</dt><dd>${usd(v)}</dd>`).join('')}
-        </dl></div></div>
-      <div class="card"><div class="ch"><h2>By type</h2></div>
-        <div class="cb">${barList(d.by_type.map((b, i) => ({
-          label: b.key, value: b.cost, color: SERIES[i % SERIES.length],
-          text: usd(b.cost), sub: `${b.agents}`,
-          href: `#/agents?${project ? `project=${encodeURIComponent(project)}&` : ''}type=${encodeURIComponent(b.key)}`,
-          tip: `${b.agents} runs · ${tok(b.tokens)} tokens\n${
-            b.api_calls.toLocaleString()} calls`,
-        })))}</div></div>
-    </section>
+    ${agentStatsHTML(d, project)}
 
     <section class="blk">
       <div class="aghead"><span></span><span>Topic</span><span>Type</span>
@@ -1456,10 +1456,7 @@ views.agents = async (params) => {
 
   hydrateTips($('#view'));
   wireWindow($('#view'));
-  colChart($('#dist'), d.distribution.map(b => ({
-    v: b.count, label: usd(b.lo),
-    tip: `${usd(b.lo)} – ${usd(b.hi)}\n${b.count} agents`,
-  })), { height: 138, fmt: v => Math.round(v) });
+  agentStatsChart(d);
   // Links inside <summary> must not toggle the group.
   $$('.agsess summary a').forEach(a =>
     a.addEventListener('click', e => e.stopPropagation()));
