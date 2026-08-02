@@ -449,12 +449,12 @@ function openModal(title) {
   addEventListener('keydown', m._esc);
   return m;
 }
-async function openToolCalls(tool, sid) {
+async function openToolCalls(tool, sid, project) {
   const m = openModal(tool);
   let d;
   try {
     d = await api(sid ? `/api/sessions/${sid}/tool-calls` : '/api/tool-calls',
-                  { tool });
+                  { tool, project });
   } catch (e) {
     if ($('#modal') === m) $('#mBody').innerHTML =
       `<div class="empty"><b>Couldn't load calls</b>${esc(e.message)}</div>`;
@@ -478,9 +478,9 @@ async function openToolCalls(tool, sid) {
     </div>`).join('') ||
     '<div class="empty"><b>No calls found</b>Nothing recorded in the searched range.</div>';
 }
-function wireToolRows(root, sid) {
+function wireToolRows(root, sid, project) {
   $$('.brow[data-act]', root).forEach(b =>
-    b.addEventListener('click', () => openToolCalls(b.dataset.act, sid)));
+    b.addEventListener('click', () => openToolCalls(b.dataset.act, sid, project)));
 }
 function legend(pairs) {
   return '<div class="legend">' + pairs.map(([n, c]) =>
@@ -796,6 +796,8 @@ const SKELETONS = {
 };
 const PAGE = {
   overview:  { title: 'Dashboard', skel: () => SKELETONS.tiles(3) + SKELETONS.card() },
+  projects:  { title: 'Projects',  skel: () => SKELETONS.tiles(6) },
+  project:   { title: 'Project',   skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   sessions:  { title: 'Sessions',  skel: () => SKELETONS.rows(14) },
   session:   { title: 'Session',   skel: () => SKELETONS.tiles(6) + SKELETONS.card() },
   agents:    { title: 'Agents',    skel: () => SKELETONS.card() + SKELETONS.rows(10) },
@@ -1009,6 +1011,169 @@ views.overview = async () => {
     tip: `${r.date}\n${usd(r.cost)} · ${r.sessions} sessions`,
   })), { height: 248 });
   waveChart($('#wave'), daily, { height: 248 });
+};
+
+// ── projects (the primary hierarchy: project → everything scoped) ─────
+
+views.projects = async () => {
+  const [d, sess] = await Promise.all([
+    api('/api/summary'),
+    api('/api/sessions', { limit: 2000 }),
+  ]);
+  const extra = {};
+  for (const s of sess.sessions) {
+    const e = extra[s.project] || (extra[s.project] = {
+      live: 0, running: 0, last: '' });
+    if (s.live) e.live++;
+    e.running += s.agents_running || 0;
+    if (s.ended && s.ended > e.last) e.last = s.ended;
+  }
+  const cards = d.projects.map(p => {
+    const e = extra[p.key] || { live: 0, running: 0, last: '' };
+    return `
+    <a class="card projcard" href="#/project/${encodeURIComponent(p.key)}">
+      <div class="pc-head">${avatar(p.key)}<b>${esc(p.key)}</b>
+        ${e.live ? `<span class="st live"><i></i>${e.live} live</span>` : ''}
+      </div>
+      <div class="pc-stats">
+        <span><b class="num">${p.sessions}</b> session${p.sessions === 1 ? '' : 's'}</span>
+        <span><b class="num">${p.agents}</b> agent${p.agents === 1 ? '' : 's'}</span>
+        <span class="num cost">${usd(p.cost)}</span>
+      </div>
+      <div class="pc-foot">${e.running
+        ? `<span class="agr">${e.running}▶ agents now</span> · ` : ''}last activity ${
+        e.last ? ago(e.last) : '—'} · open →</div>
+    </a>`;
+  }).join('');
+
+  $('#view').innerHTML = `
+    <div class="hd">
+      <div><h1>Projects</h1><p class="sub">${d.projects.length} project${
+        d.projects.length === 1 ? '' : 's'} · ${usd(d.totals.cost)} in the last ${
+        winLabel()}</p></div>
+      <div class="right">${windowPicker()}</div>
+    </div>
+    <div class="gitgrid">${cards ||
+      '<div class="empty"><b>No projects in this window</b>Widen the time window to see older work.</div>'}</div>`;
+  hydrateTips($('#view'));
+  wireWindow($('#view'));
+};
+
+views.project = async (params, nameEnc) => {
+  const name = decodeURIComponent(nameEnc || '');
+  const P = encodeURIComponent(name);
+  const [d, sess, wfs, git] = await Promise.all([
+    api('/api/summary', { project: name }),
+    api('/api/sessions', { project: name, limit: 400 }),
+    api('/api/workflows', { project: name }),
+    api('/api/git', { range: 'all' }).catch(() => null),
+  ]);
+  const t = d.totals;
+  const live = sess.sessions.filter(s => s.live).length;
+  const running = sess.sessions.reduce((a, s) => a + (s.agents_running || 0), 0);
+  const repo = git && git.repos.find(r => r.project === name);
+  const daily = d.daily || [];
+  const windowSpend = daily.reduce((a, r) => a + r.cost, 0);
+
+  const rows = sess.sessions.slice(0, 8).map(s => {
+    const st = sessStatus(s);
+    return {
+      _href: `#/session/${s.id}`,
+      sess: `<b>${esc(s.title)}</b>`,
+      model: `<span class="mchip">${esc(s.model_label)}</span>`,
+      tk: tok(s.tokens), ag: agentsCell(s),
+      cost: usd(s.cost), st: stPill(st),
+      when: `<span class="dur">${ago(s.ended)}</span>`,
+    };
+  });
+
+  const wfRows = wfs.workflows.slice(0, 5).map(w => `
+    <a class="wfmini" href="#/workflow/${esc(w.session_id)}/${esc(w.id)}">
+      <span class="t">${esc(w.name || w.topic)}</span>
+      ${w.running ? `<span class="st run"><i></i>${w.running}</span>` : ''}
+      <span class="mut num">${w.completed}/${w.agents}</span>
+      <span class="num cost">${usd(w.cost)}</span>
+      <span class="dur">${ago(w.started)}</span>
+    </a>`).join('');
+
+  const st0 = repo && repo.stats;
+  $('#view').innerHTML = `
+    <div class="crumb"><a href="#/projects">Projects</a> / ${esc(name)}</div>
+    <div class="hd">
+      <div><h1>${avatar(name)} ${esc(name)}
+        ${live ? `<span class="st live" style="margin-left:8px"><i></i>${
+          live} live</span>` : ''}</h1>
+        <p class="sub">${t.sessions} session${t.sessions === 1 ? '' : 's'} · ${
+          usd(t.cost)} in the last ${winLabel()}</p></div>
+      <div class="right">${windowPicker()}</div>
+    </div>
+
+    <div class="secnav">
+      <a href="#/sessions?project=${P}">Sessions <b>${t.sessions}</b></a>
+      <a href="#/agents?project=${P}">Agents <b>${t.agents}</b></a>
+      <a href="#/workflows?project=${P}">Workflows <b>${wfs.workflows.length}</b></a>
+      ${repo ? `<a href="#/git/repo/${esc(repo.id)}">Git ${st0 && st0.wip
+        ? `<b>${tok(st0.wip)} wip</b>` : ''}</a>` : ''}
+      <a href="#/cost?project=${P}">Cost <b>${usd(t.cost)}</b></a>
+      <a href="#/tools?project=${P}">Tools</a>
+    </div>
+
+    <div class="kpis">
+      ${[[usd(windowSpend), 'Spend', `in the last ${winLabel()}`],
+         [t.sessions, 'Sessions', `${live} live now`],
+         [t.agents, 'Agents', running ? `${running} running now` : 'subagent runs'],
+         [tok(t.tokens), 'Tokens', `${tok(d.economics.tokens.output)} output`],
+         [`${t.savings_pct.toFixed(0)}%`, 'Cache savings', usd(t.savings) + ' saved']]
+        .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
+          <div class="v">${v}</div>
+          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
+    </div>
+
+    <section class="blk" style="display:grid;grid-template-columns:minmax(320px,1fr) minmax(420px,1.5fr);gap:16px">
+      <div class="card"><div class="ch"><h2>Spend per day</h2></div>
+        <div class="cb"><div id="pDaily"></div></div></div>
+      <div class="card"><div class="ch"><h2>Recent sessions</h2>
+        <a class="meta" href="#/sessions?project=${P}">all →</a></div>
+        <div class="cb" style="padding:4px 0 0">${table([
+          { h: 'Session', key: 'sess', grow: 1, link: 1 },
+          { h: 'Model', key: 'model' }, { h: 'Tokens', key: 'tk', n: 1 },
+          { h: 'Agents', key: 'ag', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
+          { h: 'Status', key: 'st' }, { h: 'Last write', key: 'when', n: 1 }],
+          rows)}</div></div>
+    </section>
+
+    <section class="blk" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px">
+      ${wfRows ? `<div class="card"><div class="ch"><h2>Workflows</h2>
+        <a class="meta" href="#/workflows?project=${P}">all →</a></div>
+        <div class="cb">${wfRows}</div></div>` : ''}
+      ${repo ? `<div class="card"><div class="ch">
+        <h2><a class="repolink" href="#/git/repo/${esc(repo.id)}">Git — ${
+          esc(repo.name)}</a></h2>
+        <span class="meta">${st0 ? esc(st0.branch) : ''}</span></div>
+        <div class="cb">
+          <div class="gwip">
+            <span class="num" style="font-weight:800;font-size:1.05rem">${
+              st0 ? st0.wip.toLocaleString() : '—'}</span>
+            <span class="mut">uncommitted lines</span>
+            <span class="spk">${sparkSVG((repo.spark || []).map(p => p[1]),
+              90, 24, '#16a34a')}</span>
+          </div>
+          ${st0 && st0.commits.length ? `<div class="gcommits">${
+            st0.commits.slice(0, 3).map(c => `
+            <div class="gcommit"><code>${esc(c.hash)}</code>
+              <span class="cs" title="${esc(c.subject)}">${esc(c.subject)}</span>
+              <span class="dur">${ago(new Date(c.t * 1000).toISOString())}</span>
+            </div>`).join('')}</div>` : ''}
+        </div></div>` : ''}
+    </section>`;
+
+  hydrateTips($('#view'));
+  wireTable($('#view'));
+  wireWindow($('#view'));
+  colChart($('#pDaily'), daily.map(r => ({
+    v: r.cost, label: r.date.slice(5),
+    tip: `${r.date}\n${usd(r.cost)} · ${r.sessions} sessions`,
+  })), { height: 180 });
 };
 
 views.sessions = async (params) => {
@@ -1516,8 +1681,9 @@ views.agent = async (params, sid, aid) => {
   hydrateTips($('#view'));
 };
 
-views.workflows = async () => {
-  const d = await api('/api/workflows');
+views.workflows = async (params) => {
+  const project = params.get('project') || '';
+  const d = await api('/api/workflows', { project });
   const wfs = d.workflows;
 
   const trimCommon = labels => {
@@ -1584,10 +1750,12 @@ views.workflows = async () => {
   }).join('');
 
   $('#view').innerHTML = `
-    <div class="hd"><div><h1>Workflows</h1>
+    <div class="hd"><div><h1>Workflows${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">${wfs.length} fan-out runs · each bar is one agent, positioned
         by when it ran</p></div>
-      <div class="right">${windowPicker()}${legend([
+      <div class="right">
+        ${project ? `<a class="btn" href="#/workflows">All projects ✕</a>` : ''}
+        ${windowPicker()}${legend([
         ['completed', 'var(--vio)'], ['running', 'var(--gold)'],
         ['stopped', 'var(--line2)']])}</div>
     </div>
@@ -2420,11 +2588,14 @@ function planCard(plan) {
     </div></div>`;
 }
 
-views.cost = async () => {
-  const [d, plan] = await Promise.all([
-    api('/api/summary'),
+views.cost = async (params) => {
+  const project = params.get('project') || '';
+  const [d, planRaw] = await Promise.all([
+    api('/api/summary', { project }),
     api('/api/plan').catch(() => null),
   ]);
+  // Plan limits are account-level; inside a project scope they'd mislead.
+  const plan = project ? null : planRaw;
   state.summary = d;
   const t = d.totals, c = d.cache, e = d.economics;
   // Spend within the window, from the same daily series the chart draws —
@@ -2442,10 +2613,12 @@ views.cost = async () => {
     ['Input, uncached', 'input', SERIES[4]],
   ];
   $('#view').innerHTML = `
-    <div class="hd"><div><h1>Cost</h1>
+    <div class="hd"><div><h1>Cost${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">Last ${winLabel()} · all figures are API list-price equivalents,
         not amounts billed.</p></div>
-      <div class="right">${windowPicker()}</div></div>
+      <div class="right">
+        ${project ? `<a class="btn" href="#/cost">All projects ✕</a>` : ''}
+        ${windowPicker()}</div></div>
 
     <div class="kpis">
       ${[[usd(wSpend), 'Actual', 'with prompt caching', 'up',
@@ -2534,15 +2707,18 @@ views.cost = async () => {
   hydrateTips($('#heat'));
 };
 
-views.tools = async () => {
-  const d = state.summary = await api('/api/summary');
+views.tools = async (params) => {
+  const project = params.get('project') || '';
+  const d = await api('/api/summary', { project });
   const total = d.tools.reduce((a, b) => a + b.total, 0) || 1;
   const max = Math.max(...d.tools.map(x => x.total), 1);
   $('#view').innerHTML = `
-    <div class="hd"><div><h1>Tools</h1>
+    <div class="hd"><div><h1>Tools${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">${total.toLocaleString()} tool calls in the last ${winLabel()}
         · main thread vs subagents · click a tool to see what it ran</p></div>
-      <div class="right">${windowPicker()}${legend([
+      <div class="right">
+        ${project ? `<a class="btn" href="#/tools">All projects ✕</a>` : ''}
+        ${windowPicker()}${legend([
         ['main thread', 'var(--vio)'], ['subagents', 'var(--gold)']])}</div>
     </div>
     <div class="card"><div class="cb">
@@ -2562,7 +2738,7 @@ views.tools = async () => {
     </div></div>`;
   hydrateTips($('#view'));
   wireWindow($('#view'));
-  wireToolRows($('#view'), null);
+  wireToolRows($('#view'), null, project);
 };
 
 // ── router (instant paint, cancellation, stale-response guard) ────────
@@ -2584,7 +2760,8 @@ async function route(silent) {
   const seg = path.split('/').filter(Boolean);
   const name = seg[0] || 'overview';
 
-  const PARENT = { session: 'sessions', agent: 'agents', workflow: 'workflows' };
+  const PARENT = { session: 'sessions', agent: 'agents', workflow: 'workflows',
+                   project: 'projects' };
   const section = PARENT[name] || name;
   $$('.nav a').forEach(a => {
     const on = a.getAttribute('href') === '#/' + section;
@@ -2741,7 +2918,8 @@ fetchPlan();
 setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
-const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows', 'workflow', 'git']);
+const LIVE_PAGES = new Set(['overview', 'projects', 'project', 'sessions',
+  'agents', 'workflows', 'workflow', 'git']);
 setInterval(() => {
   const page = (location.hash.slice(1) || '/overview')
     .split('?')[0].split('/').filter(Boolean)[0] || 'overview';

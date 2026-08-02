@@ -91,6 +91,7 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
 | Page | What's there |
 | --- | --- |
 | **Overview** | Live sessions with CPU/RSS, daily spend, cost composition, weekday×hour heatmap, project and model splits |
+| **Projects** | One card per project; each project's home hub links to its scoped Sessions, Agents, Workflows, Git, Cost and Tools |
 | **Sessions** | Every session, searchable across titles *and prompt text* |
 | **Session** | Context growth, cumulative spend, cost composition, tools, per-model split, subagent table, your prompts, files touched |
 | **Agents** | Log-scale cost distribution with percentiles, breakdown by type, sortable run table |
