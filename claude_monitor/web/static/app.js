@@ -674,15 +674,15 @@ const agentPill = state2 => {
   const [cls, label] = AGENT_ST[state2] || ['done', state2];
   return `<span class="st ${cls}"><i></i>${label}</span>`;
 };
-/** Agents cell: "2▶ /34" when some are working right now, plain total when
-    idle. The running count is what you actually scan the column for. */
+/** Agents cell: "• 2 /34" when some are working right now (pulsing dot, the
+    same status language as the pills), plain total when idle. */
 const agentsCell = s => {
   const total = s.agents || 0;
   const run2 = s.agents_running || 0;
   if (!total) return '·';
   if (!run2) return String(total);
-  return `<span class="agr" title="${run2} running now · ${total} total">${
-    run2}▶</span><span class="mut">/${total}</span>`;
+  return `<span class="agr" title="${run2} running now · ${total} total"><i></i>${
+    run2}</span> <span class="mut">/${total}</span>`;
 };
 
 const avatar = name => {
@@ -1049,7 +1049,14 @@ views.projects = async () => {
     e.running += s.agents_running || 0;
     if (s.ended && s.ended > e.last) e.last = s.ended;
   }
-  const cards = d.projects.map(p => {
+  // Most recently prompted first — the project you're working on is the one
+  // you're looking for, not the historically most expensive one.
+  const ordered = [...d.projects].sort((a, b) => {
+    const la = (extra[a.key] || {}).last || '';
+    const lb = (extra[b.key] || {}).last || '';
+    return lb < la ? -1 : lb > la ? 1 : b.cost - a.cost;
+  });
+  const cards = ordered.map(p => {
     const e = extra[p.key] || { live: 0, running: 0, last: '' };
     return `
     <a class="card projcard" href="#/project/${encodeURIComponent(p.key)}">
@@ -1062,7 +1069,8 @@ views.projects = async () => {
         <span class="num cost">${usd(p.cost)}</span>
       </div>
       <div class="pc-foot">${e.running
-        ? `<span class="agr">${e.running}▶ agents now</span> · ` : ''}last activity ${
+        ? `<span class="agr"><i></i>${e.running} agent${
+            e.running === 1 ? '' : 's'} running</span> · ` : ''}last activity ${
         e.last ? ago(e.last) : '—'} · open →</div>
     </a>`;
   }).join('');
@@ -1083,9 +1091,10 @@ views.projects = async () => {
 views.project = async (params, nameEnc) => {
   const name = decodeURIComponent(nameEnc || '');
   const P = encodeURIComponent(name);
-  const [d, sess, wfs, git] = await Promise.all([
+  const [d, sess, ag, wfs, git] = await Promise.all([
     api('/api/summary', { project: name }),
     api('/api/sessions', { project: name, limit: 400 }),
+    api('/api/agents', { project: name, limit: 60 }),
     api('/api/workflows', { project: name }),
     api('/api/git', { range: 'all' }).catch(() => null),
   ]);
@@ -1107,6 +1116,14 @@ views.project = async (params, nameEnc) => {
       when: `<span class="dur">${ago(s.ended)}</span>`,
     };
   });
+
+  const agRows = ag.agents.slice(0, 6).map(a => `
+    <a class="wfmini" href="#/agent/${esc(a.session_id)}/${esc(a.id)}">
+      ${agentPill(a.state)}
+      <span class="t" title="${esc(a.topic)}">${esc(a.topic)}</span>
+      <span class="num cost">${usd(a.cost)}</span>
+      <span class="dur">${ago(a.started)}</span>
+    </a>`).join('');
 
   const wfRows = wfs.workflows.slice(0, 5).map(w => `
     <a class="wfmini" href="#/workflow/${esc(w.session_id)}/${esc(w.id)}">
@@ -1140,33 +1157,37 @@ views.project = async (params, nameEnc) => {
     </div>
 
     <div class="kpis">
-      ${[[usd(windowSpend), 'Spend', `in the last ${winLabel()}`],
-         [t.sessions, 'Sessions', `${live} live now`],
+      ${[[t.sessions, 'Sessions', `${live} live now`],
          [t.agents, 'Agents', running ? `${running} running now` : 'subagent runs'],
          [tok(t.tokens), 'Tokens', `${tok(d.economics.tokens.output)} output`],
-         [`${t.savings_pct.toFixed(0)}%`, 'Cache savings', usd(t.savings) + ' saved']]
+         [`${t.savings_pct.toFixed(0)}%`, 'Cache savings', usd(t.savings) + ' saved'],
+         [usd(windowSpend), 'Spend', `in the last ${winLabel()}`]]
         .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
           <div class="v">${v}</div>
           <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
     </div>
 
-    <section class="blk" style="display:grid;grid-template-columns:minmax(320px,1fr) minmax(420px,1.5fr);gap:16px">
-      <div class="card"><div class="ch"><h2>Spend per day</h2></div>
-        <div class="cb"><div id="pDaily"></div></div></div>
-      <div class="card"><div class="ch"><h2>Recent sessions</h2>
+    <section class="blk"><div class="card">
+      <div class="ch"><h2>Sessions</h2>
         <a class="meta" href="#/sessions?project=${P}">all →</a></div>
-        <div class="cb" style="padding:4px 0 0">${table([
-          { h: 'Session', key: 'sess', grow: 1, link: 1 },
-          { h: 'Model', key: 'model' }, { h: 'Tokens', key: 'tk', n: 1 },
-          { h: 'Agents', key: 'ag', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
-          { h: 'Status', key: 'st' }, { h: 'Last write', key: 'when', n: 1 }],
-          rows)}</div></div>
-    </section>
+      <div class="cb" style="padding:4px 0 0">${table([
+        { h: 'Session', key: 'sess', grow: 1, link: 1 },
+        { h: 'Model', key: 'model' }, { h: 'Tokens', key: 'tk', n: 1 },
+        { h: 'Agents', key: 'ag', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
+        { h: 'Status', key: 'st' }, { h: 'Last write', key: 'when', n: 1 }],
+        rows)}</div>
+    </div></section>
 
     <section class="blk" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px">
+      ${agRows ? `<div class="card"><div class="ch"><h2>Agents</h2>
+        <a class="meta" href="#/agents?project=${P}">all →</a></div>
+        <div class="cb">${agRows}</div></div>` : ''}
       ${wfRows ? `<div class="card"><div class="ch"><h2>Workflows</h2>
         <a class="meta" href="#/workflows?project=${P}">all →</a></div>
         <div class="cb">${wfRows}</div></div>` : ''}
+    </section>
+
+    <section class="blk" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px">
       ${repo ? `<div class="card"><div class="ch">
         <h2><a class="repolink" href="#/git/repo/${esc(repo.id)}">Git — ${
           esc(repo.name)}</a></h2>
@@ -1186,6 +1207,8 @@ views.project = async (params, nameEnc) => {
               <span class="dur">${ago(new Date(c.t * 1000).toISOString())}</span>
             </div>`).join('')}</div>` : ''}
         </div></div>` : ''}
+      <div class="card"><div class="ch"><h2>Spend per day</h2></div>
+        <div class="cb"><div id="pDaily"></div></div></div>
     </section>`;
 
   hydrateTips($('#view'));
@@ -2790,20 +2813,37 @@ async function route(silent) {
   const seg = path.split('/').filter(Boolean);
   const name = seg[0] || 'overview';
 
-  // Sessions/Agents/Workflows have no nav item of their own — they are
-  // reached through a project, so they light up Projects.
-  const PARENT = { session: 'projects', sessions: 'projects',
-                   agent: 'projects', agents: 'projects',
+  // Which sidebar entry owns this screen.
+  //
+  // Detail pages light the list they came from: one session belongs under
+  // Sessions, one agent run under Agents. Workflows has no menu entry, so it
+  // and its detail pages fall to Projects, and so does a project's own page.
+  const PARENT = { session: 'sessions',
+                   agent: 'agents',
                    workflow: 'projects', workflows: 'projects',
                    project: 'projects' };
-  const section = PARENT[name] || name;
+
+  // Cost and Tools are different: each exists twice. There is a global Cost
+  // and a global Tools in the sidebar, and there is a per-project Cost and
+  // Tools reached from the project's sub-nav. Both are the same view name, so
+  // a name-keyed map cannot tell them apart, and the project-scoped one used
+  // to light its own global entry — the sidebar said Tools while the crumb
+  // said Projects / <name> / Tools.
+  //
+  // The scope is the `project` param, and it is exactly what makes a view
+  // draw a project crumb. So: a screen showing a crumb belongs to Projects.
+  const inProject = (params.get('project') || '') !== '';
+  const section = PARENT[name] || (inProject ? 'projects' : name);
+
   $$('.nav a').forEach(a => {
     const on = a.getAttribute('href') === '#/' + section;
     a.classList.toggle('active', on);
     if (on) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  document.title = `${(PAGE[name] || {}).title || 'Dashboard'} · Claude Code Monitor`;
+
+  const scopeName = inProject ? ` — ${params.get('project')}` : '';
+  document.title = `${(PAGE[name] || {}).title || 'Dashboard'}${scopeName} · Claude Code Monitor`;
 
   const fn = views[name];
   if (!fn) { location.hash = '#/overview'; return; }

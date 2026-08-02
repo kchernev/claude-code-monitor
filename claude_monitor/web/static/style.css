@@ -129,7 +129,12 @@ a{color:inherit;text-decoration:none}
          color:var(--side-ink3);text-align:right;margin-top:-3px;line-height:1.3;
          font-variant-numeric:tabular-nums}
 /* running-agents count inside the Agents column */
-.agr{color:var(--gold);font-weight:700}
+.agr{display:inline-flex;align-items:center;gap:6px;color:var(--gold);font-weight:700}
+/* A running count is a status, so it gets the same dot every other status in
+   this app gets. It used to be a literal ▶ jammed against the number with no
+   space — "3▶ agents now" — which read as a typo rather than an indicator. */
+.agr i{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none;
+       animation:pulse 1.9s ease-in-out infinite}
 .sideinfo{background:var(--side3);border-radius:14px;padding:13px 14px;margin-top:12px}
 .sideinfo .t{display:flex;align-items:center;gap:8px;color:var(--side-ink3);
              font-size:12.5px;font-weight:700}
