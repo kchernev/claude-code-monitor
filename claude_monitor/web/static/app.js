@@ -526,6 +526,27 @@ function gitChart(host, rows, opts = {}) {
   const commits = opts.commits || [];
   host.innerHTML = '';
   if (!rows.length) { host.innerHTML = '<div class="empty">No data</div>'; return; }
+  if (!wip) {
+    // One candle per natural time unit, computed server-side (24h → 24
+    // hourly candles). The 240-bucket points grid stays for the WIP line.
+    if (opts.candles && opts.candles.length) {
+      rows = opts.candles.map(c =>
+        ({ t: c.t, tEnd: c.t_end, committed: c.committed }));
+    } else {
+      // fallback for a payload without candles: coalesce to ~64 bars
+      const g = Math.max(1, Math.ceil(rows.length / 64));
+      const agg = [];
+      for (let i = 0; i < rows.length; i += g) {
+        const chunk = rows.slice(i, i + g);
+        agg.push({
+          t: chunk[0].t,
+          tEnd: chunk[chunk.length - 1].t,
+          committed: chunk.reduce((a, r) => a + (r.committed || 0), 0),
+        });
+      }
+      rows = agg;
+    }
+  }
   const val = r => wip ? r.wip : r.committed;
   const mx = Math.max(...rows.map(r => val(r) || 0), 10);
   const sc = niceScale(mx);
@@ -565,13 +586,13 @@ function gitChart(host, rows, opts = {}) {
     // between sparse bucket sums would imply activity where there was none.
     const yb = H - pad.b;
     const iw = (W - pad.l - pad.r) / rows.length;
-    const bw = Math.max(1.5, iw - 2);
+    const bw = Math.max(2, iw - 3);
     rows.forEach((r, i) => {
       if (!r.committed) return;
       const bh = Math.max(2, (r.committed / sc.max) * (H - pad.t - pad.b));
       svg('rect', {
         x: pad.l + i * iw + (iw - bw) / 2, y: yb - bh,
-        width: bw, height: bh, rx: Math.min(2.5, bw / 3),
+        width: bw, height: bh, rx: Math.min(3, bw / 3),
         fill: color, opacity: .85,
       }, s);
     });
@@ -595,17 +616,30 @@ function gitChart(host, rows, opts = {}) {
   hit.addEventListener('mousemove', e => {
     const bb = s.getBoundingClientRect();
     const px = (e.clientX - bb.left) * (W / bb.width);
-    let best = rows[0], bd = Infinity;
-    for (const r of rows) {
-      const dd = Math.abs(X(r.t) - px);
-      if (dd < bd) { bd = dd; best = r; }
+    let best, cx;
+    if (wip) {
+      best = rows[0];
+      let bd = Infinity;
+      for (const r of rows) {
+        const dd = Math.abs(X(r.t) - px);
+        if (dd < bd) { bd = dd; best = r; }
+      }
+      cx = X(best.t);
+    } else {
+      // snap to the bar under the cursor, crosshair at its center
+      const iw = (W - pad.l - pad.r) / rows.length;
+      const idx = Math.max(0, Math.min(rows.length - 1,
+        Math.floor((px - pad.l) / iw)));
+      best = rows[idx];
+      cx = pad.l + idx * iw + iw / 2;
     }
-    cross.setAttribute('x1', X(best.t)); cross.setAttribute('x2', X(best.t));
+    cross.setAttribute('x1', cx); cross.setAttribute('x2', cx);
     cross.setAttribute('opacity', 1);
     const v = val(best);
     tipEl.textContent = wip
       ? `${fmtT(best.t)}\nWIP ${v == null ? '—' : v.toLocaleString() + ' lines'}`
-      : `${fmtT(best.t)}\n+${(v || 0).toLocaleString()} lines committed here`;
+      : `${fmtT(best.t)} – ${fmtT(best.tEnd)}\n+${
+          (v || 0).toLocaleString()} lines committed`;
     tipEl.classList.add('on');
     tipEl.style.left = Math.min(e.clientX + 13, innerWidth - 220) + 'px';
     tipEl.style.top = (e.clientY - 46) + 'px';
@@ -1604,7 +1638,7 @@ views.git = async (params, sub, rid) => {
   wireGitTabs('live');
   wireGitRange(rng);
   gitChart($('#gitCommitted'), h.points,
-           { mode: 'committed', commits: h.commits,
+           { mode: 'committed', commits: h.commits, candles: h.candles,
              start: h.start, end: h.end, height: 200 });
   gitChart($('#gitWip'), h.points,
            { mode: 'wip', start: h.start, end: h.end, height: 200 });

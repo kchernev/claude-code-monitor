@@ -660,6 +660,35 @@ class GitMonitor:
         events.sort()
         markers.sort(key=lambda m: m["t"])
 
+        # Candles: one bar per natural time unit — 24h window → 24 hourly
+        # candles, 7d → 28 six-hour ones — instead of arbitrary chart buckets.
+        # Every range divides evenly, so the window is exactly n candles.
+        if range_s <= 3600:
+            cw = 300           # 1h  → 12 × 5min
+        elif range_s <= 14400:
+            cw = 900           # 4h  → 16 × 15min
+        elif range_s <= 86400:
+            cw = 3600          # 24h → 24 × 1h
+        elif range_s <= 7 * 86400:
+            cw = 6 * 3600      # 7d  → 28 × 6h
+        else:
+            cw = 86400         # 30d → 30 × 1d
+        n_candles = max(1, int(range_s // cw))
+        candles = []
+        ci = 0
+        for k in range(n_candles):
+            lo = start + k * cw
+            hi = lo + cw
+            add = 0
+            last = k == n_candles - 1
+            while ci < len(events) and (
+                events[ci][0] <= hi if last else events[ci][0] < hi
+            ):
+                add += events[ci][1]
+                ci += 1
+            candles.append({"t": round(lo, 1), "t_end": round(hi, 1),
+                            "committed": add})
+
         points = []
         ei = 0
         total_committed = 0
@@ -688,6 +717,7 @@ class GitMonitor:
             })
         return {"points": points, "start": start, "end": now,
                 "width": width, "total_committed": total_committed,
+                "candles": candles,
                 # markers are capped for display; the count is not
                 "commit_count": len(markers),
                 "commits": markers[-150:]}
