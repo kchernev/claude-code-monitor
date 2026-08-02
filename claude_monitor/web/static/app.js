@@ -827,13 +827,21 @@ views.overview = async () => {
       </div>
     </section>
 
-    <section class="blk"><div class="card">
-      <div class="ch"><h2>Spend, cumulative
-        <span style="color:var(--green);font-size:12px;margin-left:8px">${
-          usd(windowSpend)} in the last ${winLabel()}</span></h2>
-        ${windowPicker()}</div>
-      <div class="cb"><div id="wave"></div></div>
-    </div></section>
+    <section class="blk" style="display:grid;
+        grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">
+      <div class="card">
+        <div class="ch"><h2>Spend per day</h2>
+          <span class="meta">peak ${usd(Math.max(...dailyCost, 0))}/day</span></div>
+        <div class="cb"><div id="dailyBars"></div></div>
+      </div>
+      <div class="card">
+        <div class="ch"><h2>Spend, cumulative
+          <span style="color:var(--green);font-size:12px;margin-left:8px">${
+            usd(windowSpend)} in the last ${winLabel()}</span></h2>
+          ${windowPicker()}</div>
+        <div class="cb"><div id="wave"></div></div>
+      </div>
+    </section>
 
     <footer class="pagefoot"><span>Transcripts never leave this machine — the only
         network call is to Anthropic, for your plan limits.</span>
@@ -842,6 +850,10 @@ views.overview = async () => {
   hydrateTips($('#view'));
   wireTable($('#view'));
   wireWindow($('#view'));
+  colChart($('#dailyBars'), daily.map(r => ({
+    v: r.cost, label: r.date.slice(5),
+    tip: `${r.date}\n${usd(r.cost)} · ${r.sessions} sessions`,
+  })), { height: 248 });
   waveChart($('#wave'), daily, { height: 248 });
 };
 
