@@ -515,10 +515,10 @@ function heatmap(cells) {
   return html;
 }
 
-/** One git series per chart. mode 'committed': violet area stepping up at
-    commits, diamond marker per commit. mode 'wip': green line with gaps
-    where the monitor wasn't sampling. Each gets its own scale — on one axis
-    a 20K-line WIP flattens a 500-line committed step into invisibility. */
+/** One git series per chart. mode 'committed': violet columns — lines landed
+    per interval — with a diamond marker per commit. mode 'wip': green line
+    with gaps where the monitor wasn't sampling. Each gets its own scale — on
+    one axis a 20K-line WIP flattens a 500-line commit into invisibility. */
 function gitChart(host, rows, opts = {}) {
   const W = host.clientWidth || 700, H = opts.height || 200;
   const pad = { t: 10, r: 8, b: 24, l: 52 };
@@ -561,17 +561,20 @@ function gitChart(host, rows, opts = {}) {
     else host.insertAdjacentHTML('beforeend',
       '<div class="empty">No samples yet — the WIP line starts when the monitor starts.</div>');
   } else {
-    const cd = rows.map((r, i) =>
-      `${i ? 'L' : 'M'}${X(r.t).toFixed(1)},${Y(r.committed).toFixed(1)}`).join('');
-    const gid = 'gc' + (++gradSeq);
-    const defs = svg('defs', {}, s);
-    const grad = svg('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
-    svg('stop', { offset: 0, 'stop-color': '#7b5cfa', 'stop-opacity': .2 }, grad);
-    svg('stop', { offset: 1, 'stop-color': '#7b5cfa', 'stop-opacity': 0 }, grad);
-    svg('path', { d: `${cd}L${X(x1)},${H - pad.b}L${X(x0)},${H - pad.b}Z`,
-                  fill: `url(#${gid})` }, s);
-    svg('path', { class: 'ln', d: cd, stroke: color }, s);
+    // Columns: lines committed in each interval. Bars, not a line — a line
+    // between sparse bucket sums would imply activity where there was none.
     const yb = H - pad.b;
+    const iw = (W - pad.l - pad.r) / rows.length;
+    const bw = Math.max(1.5, iw - 2);
+    rows.forEach((r, i) => {
+      if (!r.committed) return;
+      const bh = Math.max(2, (r.committed / sc.max) * (H - pad.t - pad.b));
+      svg('rect', {
+        x: pad.l + i * iw + (iw - bw) / 2, y: yb - bh,
+        width: bw, height: bh, rx: Math.min(2.5, bw / 3),
+        fill: color, opacity: .85,
+      }, s);
+    });
     for (const c of commits) {
       const x = X(c.t);
       const m = svg('path', {
@@ -600,8 +603,9 @@ function gitChart(host, rows, opts = {}) {
     cross.setAttribute('x1', X(best.t)); cross.setAttribute('x2', X(best.t));
     cross.setAttribute('opacity', 1);
     const v = val(best);
-    tipEl.textContent = `${fmtT(best.t)}\n${wip ? 'WIP' : 'committed'} ${
-      v == null ? '—' : v.toLocaleString() + ' lines'}`;
+    tipEl.textContent = wip
+      ? `${fmtT(best.t)}\nWIP ${v == null ? '—' : v.toLocaleString() + ' lines'}`
+      : `${fmtT(best.t)}\n+${(v || 0).toLocaleString()} lines committed here`;
     tipEl.classList.add('on');
     tipEl.style.left = Math.min(e.clientX + 13, innerWidth - 220) + 'px';
     tipEl.style.top = (e.clientY - 46) + 'px';
@@ -1493,7 +1497,6 @@ views.git = async (params, sub, rid) => {
   ]);
   const t = d.totals;
   const scoped = repo !== 'all' ? d.repos.find(r => r.id === repo) : null;
-  const last = h.points[h.points.length - 1] || {};
   const lastWip = [...h.points].reverse().find(p => p.wip != null);
 
   const cards = d.repos.map(r => {
@@ -1564,8 +1567,9 @@ views.git = async (params, sub, rid) => {
       ${[[t.wip.toLocaleString(), 'Uncommitted lines',
           `${t.staged.toLocaleString()} staged · ${t.unstaged.toLocaleString()} unstaged · ${
             t.untracked.toLocaleString()} untracked`],
-         [t.committed_today.toLocaleString(), 'Lines committed today',
-          `${t.commits_today} commits`],
+         [(h.total_committed || 0).toLocaleString(), 'Lines committed',
+          `${h.commit_count || 0} commit${h.commit_count === 1 ? '' : 's'}${
+            scoped ? ` · ${esc(scoped.name)}` : ''} in ${gitWindowText(rng)}`],
          [`${t.dirty}<small>/${d.repos.length}</small>`, 'Repos with WIP',
           'uncommitted changes right now'],
          [d.repos.reduce((a, r) => a + r.live, 0), 'Live sessions',
@@ -1579,9 +1583,9 @@ views.git = async (params, sub, rid) => {
     <section class="blk" style="display:grid;margin-top:0;
         grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">
       <div class="card">
-        <div class="ch"><h2>Committed</h2>
-          <span class="meta">${(last.committed || 0).toLocaleString()} lines · ${
-            h.commits.length} commit${h.commits.length === 1 ? '' : 's'} in window
+        <div class="ch"><h2>Committed per interval</h2>
+          <span class="meta">${(h.total_committed || 0).toLocaleString()} lines · ${
+            h.commit_count || 0} commit${h.commit_count === 1 ? '' : 's'} in window
             · ◆ hover for detail</span></div>
         <div class="cb"><div id="gitCommitted"></div></div>
       </div>

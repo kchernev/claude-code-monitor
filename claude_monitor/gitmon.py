@@ -662,12 +662,16 @@ class GitMonitor:
 
         points = []
         ei = 0
-        committed = 0
+        total_committed = 0
         for b in range(nb):
             t_bucket = start + (b + 1) * width
+            # Per-interval, not cumulative: how many lines landed in THIS
+            # bucket. The total for the window rides along separately.
+            bucket_add = 0
             while ei < len(events) and events[ei][0] <= t_bucket:
-                committed += events[ei][1]
+                bucket_add += events[ei][1]
                 ei += 1
+            total_committed += bucket_add
             wip = 0
             have = False
             for i, (arr, _lb) in enumerate(grids):
@@ -680,7 +684,10 @@ class GitMonitor:
             points.append({
                 "t": round(t_bucket, 1),
                 "wip": wip if have else None,
-                "committed": committed,
+                "committed": bucket_add,
             })
         return {"points": points, "start": start, "end": now,
+                "width": width, "total_committed": total_committed,
+                # markers are capped for display; the count is not
+                "commit_count": len(markers),
                 "commits": markers[-150:]}
