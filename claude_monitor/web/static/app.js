@@ -1449,9 +1449,8 @@ views.git = async (params) => {
   $('#view').innerHTML = `
     <div class="hd">
       <div><h1>Git</h1><p class="sub">${d.repos.length} repositor${
-        d.repos.length === 1 ? 'y' : 'ies'} Claude worked in during the last ${
-        winLabel()} · sampled every ${d.interval.toFixed(0)}s</p></div>
-      <div class="right">${windowPicker()}</div>
+        d.repos.length === 1 ? 'y' : 'ies'} from your sessions · sampled every ${
+        d.interval.toFixed(0)}s</p></div>
     </div>
 
     <div class="kpis">
@@ -1487,7 +1486,6 @@ views.git = async (params) => {
       '<div class="empty"><b>No repositories found</b>No session in this window ran inside a git repository.</div>'}</div>`;
 
   hydrateTips($('#view'));
-  wireWindow($('#view'));
   gitChart($('#gitChart'), h.points, h.commits,
            { start: h.start, end: h.end, height: 230 });
   const setP = (k, v, def) => {

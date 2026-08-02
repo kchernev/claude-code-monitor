@@ -266,7 +266,9 @@ class GitMonitor:
         return self._tick % every == phase
 
     def _loop(self) -> None:
-        while not self._stop.wait(self.interval):
+        # Work first, wait after — the page is served within moments of
+        # startup and must not show an empty repo list for one interval.
+        while not self._stop.is_set():
             self._tick += 1
             try:
                 self._discover()
@@ -286,7 +288,9 @@ class GitMonitor:
                         while buf and buf[0][0] < cutoff:
                             buf.pop(0)
             except Exception:
-                continue  # a repo mid-gc or a vanished path; next tick retries
+                pass  # a repo mid-gc or a vanished path; next tick retries
+            if self._stop.wait(self.interval):
+                break
 
     # -- commit log (for the committed series and markers) ----------------
 
@@ -316,26 +320,20 @@ class GitMonitor:
         self._commit_log[rid] = (now, out)
         return out
 
-    # -- filtering --------------------------------------------------------
-
-    def _shown(self, days: Optional[int]) -> List[dict]:
-        """Repos to display: session activity within the window, or live."""
-        with self._lock:
-            repos = [dict(r) for r in self._repos.values()]
-        if days:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-            repos = [
-                r for r in repos
-                if r["live"] or (r["last_activity"]
-                                 and r["last_activity"] >= cutoff)
-            ]
-        return repos
-
     # -- payloads ---------------------------------------------------------
 
-    def snapshot(self, days: Optional[int] = None) -> dict:
+    def _all_repos(self) -> List[dict]:
+        with self._lock:
+            return [dict(r) for r in self._repos.values()]
+
+    def snapshot(self) -> dict:
+        """Every repo discovered from the sessions — no window filtering.
+
+        The session corpus is the filter: if Claude ever had a session in a
+        git repo, it's listed.
+        """
         now = time.time()
-        repos = self._shown(days)
+        repos = self._all_repos()
         out = []
         tot = {"wip": 0, "staged": 0, "unstaged": 0, "untracked": 0,
                "committed_today": 0, "commits_today": 0, "dirty": 0}
@@ -371,10 +369,11 @@ class GitMonitor:
                 tot["committed_today"] += stats["committed_add"]
                 tot["commits_today"] += stats["commits_today"]
                 tot["dirty"] += 1 if stats["wip"] > 0 else 0
+        # Newest activity first within equal wip/live — two stable passes,
+        # since an ISO string can't be negated inside one key tuple.
+        out.sort(key=lambda r: r["last_activity"] or "", reverse=True)
         out.sort(key=lambda r: (
-            -(r["stats"]["wip"] if r["stats"] else 0),
-            -(r["live"]),
-            r["last_activity"] or "",
+            -(r["stats"]["wip"] if r["stats"] else 0), -r["live"],
         ))
         return {
             "repos": out, "totals": tot, "now": now,
@@ -382,8 +381,7 @@ class GitMonitor:
             "sampling_since": self.started_at,
         }
 
-    def history(self, repo_sel: str, range_s: int,
-                days: Optional[int] = None) -> dict:
+    def history(self, repo_sel: str, range_s: int) -> dict:
         """WIP + committed series and commit markers over the trailing window.
 
         WIP comes from the in-memory samples (buckets with no sample within the
@@ -393,7 +391,7 @@ class GitMonitor:
         """
         now = time.time()
         start = now - range_s
-        repos = self._shown(days)
+        repos = self._all_repos()
         if repo_sel != "all":
             repos = [r for r in repos if r["id"] == repo_sel]
         rids = [r["id"] for r in repos]
