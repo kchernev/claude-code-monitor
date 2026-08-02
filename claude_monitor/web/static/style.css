@@ -511,6 +511,57 @@ footer.pagefoot{display:flex;justify-content:space-between;color:var(--ink3);
           font-weight:600;font-size:11.5px;white-space:nowrap}
 .wfhead a:hover{text-decoration:underline}
 
+/* ── workflow debugger ── */
+.wf-split{display:grid;grid-template-columns:minmax(480px,1.45fr) minmax(340px,1fr);
+          gap:16px;align-items:start}
+@media(max-width:1150px){.wf-split{grid-template-columns:1fr}}
+.phaserow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+          margin:2px 0 14px}
+.phasechip{display:inline-flex;align-items:center;gap:7px;font-size:12px;
+  background:var(--card);border:1px solid var(--line);border-radius:99px;
+  padding:4px 12px 4px 5px;color:var(--ink2)}
+.phasechip b{width:18px;height:18px;border-radius:50%;background:var(--vio);
+  color:#fff;font-size:10.5px;display:grid;place-items:center}
+.phasearrow{color:var(--ink3);font-style:normal;font-size:12px}
+.wfg{margin-top:6px}
+.wfg-row{display:grid;grid-template-columns:minmax(160px,240px) 1fr 64px;
+  gap:12px;align-items:center;padding:3px 6px;border-radius:8px;
+  cursor:pointer;min-height:26px}
+.wfg-row.axis{cursor:default;min-height:20px;margin-bottom:2px}
+.wfg-row.axis .trk{position:relative;height:14px;border-bottom:1px solid var(--line)}
+.wfg-row.axis .trk span{position:absolute;top:0;transform:translateX(-50%);
+  font-family:var(--mono);font-size:9.5px;color:var(--ink3);white-space:nowrap}
+.wfg-row.axis .trk span:first-child{transform:none}
+.wfg-row.axis .trk span:last-child{transform:translateX(-100%)}
+.wfg-row:not(.axis):hover{background:var(--panel2)}
+.wfg-row.sel{background:color-mix(in srgb,var(--vio) 9%,var(--card));
+             outline:1px solid color-mix(in srgb,var(--vio) 35%,transparent)}
+.wfg-row .lbl{display:flex;align-items:center;gap:7px;font-size:11.5px;
+  color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wfg-row .lbl .dot{width:8px;height:8px;border-radius:50%;flex:none}
+.wfg-row .trk{position:relative;height:14px;background:var(--panel2);
+              border-radius:99px}
+.wfg-row .trk .bar{position:absolute;top:0;height:100%;border-radius:99px;
+  min-width:3px;display:flex;align-items:center;justify-content:flex-end;
+  overflow:hidden}
+.wfg-row .trk .bar b{font-family:var(--mono);font-size:8.5px;font-weight:600;
+  color:rgba(255,255,255,.92);padding-right:6px;white-space:nowrap}
+.wfg-row .trk .bar.live{animation:wfpulse 1.6s ease-in-out infinite}
+@keyframes wfpulse{50%{filter:brightness(1.25)}}
+.wfg-row .cst{font-family:var(--mono);font-size:10.5px;text-align:right;
+  color:var(--ink3);font-variant-numeric:tabular-nums}
+.insp .insp-head{display:flex;align-items:flex-start;gap:9px}
+.insp .insp-head h3{margin:0;font-size:.98rem;line-height:1.35;min-width:0}
+.insp .insp-meta{display:flex;flex-wrap:wrap;gap:5px;align-items:baseline;
+  font-size:11.5px;color:var(--ink3);margin:7px 0 10px}
+.insp .insp-meta a{color:var(--vio-text);text-decoration:none;font-weight:600}
+.insp .insp-kpis{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;
+  color:var(--ink3);border-top:1px solid var(--line);
+  border-bottom:1px solid var(--line);padding:9px 0;margin-bottom:9px}
+.insp .insp-kpis b{font-size:13.5px;color:var(--ink);margin-right:4px}
+.insp .insp-kpis b.bad{color:var(--red)}
+.insp .insp-tools .brow{padding:1px 0}
+
 /* compact stats strip on the agents pages */
 .agstats{display:grid;
   grid-template-columns:minmax(300px,1.15fr) minmax(240px,1fr);

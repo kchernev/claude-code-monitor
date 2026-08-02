@@ -801,6 +801,7 @@ const PAGE = {
   agents:    { title: 'Agents',    skel: () => SKELETONS.card() + SKELETONS.rows(10) },
   agent:     { title: 'Agent',     skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   workflows: { title: 'Workflows', skel: () => SKELETONS.card() + SKELETONS.card() },
+  workflow:  { title: 'Workflow',  skel: () => SKELETONS.tiles(6) + SKELETONS.card() },
   git:       { title: 'Git',       skel: () => SKELETONS.tiles(4) + SKELETONS.card() },
   cost:      { title: 'Cost',      skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   tools:     { title: 'Tools',     skel: () => SKELETONS.card() },
@@ -1558,12 +1559,19 @@ views.workflows = async () => {
       `<span>${f === 0 ? '0' : esc(dur(span * f))}</span>`).join('');
     return `<div class="card" style="margin-bottom:14px">
       <div class="ch">
-        <div><h2>${esc(w.topic.slice(0, 84))}</h2>
-          <p class="sub num">${esc(w.short)} · ${esc(w.project)} · ${dt(w.started)}</p></div>
-        <div style="text-align:right;white-space:nowrap">
-          <div class="num" style="font-weight:800;font-size:1.05rem">${usd(w.cost)}</div>
-          <div class="meta">${w.completed}/${w.agents} done · peak ×${
-            w.peak_parallelism}</div></div>
+        <div><h2><a class="repolink" href="#/workflow/${esc(w.session_id)}/${
+            esc(w.id)}">${esc(w.name || w.topic.slice(0, 84))}</a>
+          ${w.running ? `<span class="st run" style="margin-left:8px"><i></i>${
+            w.running} running</span>` : ''}</h2>
+          <p class="sub num">${esc(w.short)} · ${esc(w.project)} · ${dt(w.started)}${
+            w.name ? ` · ${esc(w.topic.slice(0, 60))}` : ''}</p></div>
+        <div style="display:flex;align-items:center;gap:14px">
+          <div style="text-align:right;white-space:nowrap">
+            <div class="num" style="font-weight:800;font-size:1.05rem">${usd(w.cost)}</div>
+            <div class="meta">${w.completed}/${w.agents} done · peak ×${
+              w.peak_parallelism}</div></div>
+          <a class="btn" href="#/workflow/${esc(w.session_id)}/${esc(w.id)}">Debug →</a>
+        </div>
       </div>
       <div class="cb">
         <div class="gantt">${lanes}</div>
@@ -1587,6 +1595,205 @@ views.workflows = async () => {
       'Widen the time window to see older fan-outs.</div>'}`;
   hydrateTips($('#view'));
   wireWindow($('#view'));
+};
+
+// ── workflow debugger ─────────────────────────────────────────────────
+
+const WF_COLORS = { done: 'var(--vio)', running: 'var(--gold)',
+                    stopped: 'var(--line2)' };
+
+/** Gantt with a real time axis. HTML rows (clickable, ellipsizing labels)
+    over a shared time scale; bars colored by state, selected row outlined. */
+function wfGanttHTML(agents, t0, t1, sel) {
+  const span = Math.max(1, t1 - t0);
+  const fmtT = ts => new Date(ts * 1000).toLocaleTimeString(undefined,
+    { hour: '2-digit', minute: '2-digit' });
+  const ticks = [0, .25, .5, .75, 1].map(f =>
+    `<span style="left:${(f * 100).toFixed(1)}%">${fmtT(t0 + span * f)}</span>`).join('');
+  const rows = agents.map(a => {
+    const s0 = a.started ? Date.parse(a.started) / 1000 : t0;
+    const s1 = a.ended ? Date.parse(a.ended) / 1000 : t1;
+    const x = ((s0 - t0) / span) * 100;
+    const w = Math.max(0.5, ((s1 - s0) / span) * 100);
+    const showDur = w > 9;
+    return `<div class="wfg-row${a.id === sel ? ' sel' : ''}" data-aid="${esc(a.id)}"
+        tabindex="0" role="button" title="${esc(a.topic)}">
+      <span class="lbl"><i class="dot" style="background:${
+        WF_COLORS[a.state]}"></i>${esc(a.topic)}</span>
+      <div class="trk"><i class="bar${a.state === 'running' ? ' live' : ''}"
+        style="left:${x.toFixed(2)}%;width:${w.toFixed(2)}%;background:${
+        WF_COLORS[a.state]}">${showDur
+          ? `<b>${dur(s1 - s0)}</b>` : ''}</i></div>
+      <span class="cst num">${usd(a.cost)}</span>
+    </div>`;
+  }).join('');
+  return `<div class="wfg">
+    <div class="wfg-row axis"><span class="lbl"></span>
+      <div class="trk">${ticks}</div><span class="cst"></span></div>
+    ${rows}
+  </div>`;
+}
+
+/** Agents-alive step area under the gantt — where the fan-out breathes. */
+function concChart(host, agents, t0, t1) {
+  const W = host.clientWidth || 700, H = 74;
+  const pad = { l: 0, r: 0, t: 6, b: 4 };
+  host.innerHTML = '';
+  const ev = [];
+  for (const a of agents) {
+    if (!a.started) continue;
+    ev.push([Date.parse(a.started) / 1000, 1]);
+    ev.push([a.ended ? Date.parse(a.ended) / 1000 : t1, -1]);
+  }
+  if (!ev.length) return;
+  ev.sort((x, y) => x[0] - y[0]);
+  const pts = [[t0, 0]];
+  let n = 0;
+  for (const [t, dn] of ev) { pts.push([t, n]); n += dn; pts.push([t, n]); }
+  pts.push([t1, n]);
+  const peak = Math.max(...pts.map(p => p[1]), 1);
+  const span = Math.max(1, t1 - t0);
+  const X = t => pad.l + ((t - t0) / span) * (W - pad.l - pad.r);
+  const Y = v => H - pad.b - (v / peak) * (H - pad.t - pad.b);
+  const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H }, host);
+  const d = pts.map((p, i) =>
+    `${i ? 'L' : 'M'}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join('');
+  svg('path', { d: `${d}L${X(t1)},${Y(0)}L${X(t0)},${Y(0)}Z`,
+                fill: 'color-mix(in srgb,var(--vio) 14%,transparent)' }, s);
+  svg('path', { class: 'ln', d, stroke: 'var(--vio)', 'stroke-width': 1.6 }, s);
+  const t = svg('text', { class: 'axis-t', x: 2, y: 12 }, s);
+  t.textContent = `parallelism · peak ×${peak}`;
+}
+
+function wfInspectorHTML(a, d) {
+  if (!a) return '<div class="empty"><b>Pick an agent</b>Click a bar in the timeline.</div>';
+  const toolsTotal = Object.values(a.tools).reduce((x, y) => x + y, 0);
+  const looksJson = /^[[{]/.test((a.result_full || '').trim());
+  return `
+    <div class="insp-head">
+      ${agentPill(a.state)}
+      <h3 title="${esc(a.topic)}">${esc(a.topic)}</h3>
+    </div>
+    <div class="insp-meta">${esc(a.type)} · ${esc(a.model_label)} ·
+      started ${ago(a.started)} · <span class="dur">${dur(a.duration_s)}</span>
+      · ${a.output_tps.toFixed(0)} tok/s
+      <a style="margin-left:auto" href="#/agent/${esc(d.session_id)}/${
+        esc(a.id)}">full page →</a></div>
+    <div class="insp-kpis">
+      <span><b class="num">${usd(a.cost)}</b> cost</span>
+      <span><b class="num">${tok(a.tokens)}</b> tokens</span>
+      <span><b class="num">${a.api_calls}</b> calls</span>
+      <span><b class="num${a.tool_errors ? ' bad' : ''}">${a.tool_errors}</b> tool errors</span>
+    </div>
+    ${toolsTotal ? `<div class="insp-tools">${barList(Object.entries(a.tools)
+      .sort((x, y) => y[1] - x[1]).slice(0, 6)
+      .map(([n, c]) => ({ label: n, value: c, text: String(c) })))}</div>` : ''}
+    <details class="dfile" style="margin-top:10px">
+      <summary>Prompt <span class="mut">· ${(a.prompt || '').length} chars</span></summary>
+      <pre class="cmt-body" style="margin:0;border-radius:0;max-height:300px;overflow:auto">${
+        esc(a.prompt || '—')}</pre>
+    </details>
+    <details class="dfile" style="margin-top:8px" ${a.result_full ? 'open' : ''}>
+      <summary>Result${looksJson ? ' <span class="mut">· structured</span>' : ''}</summary>
+      <pre class="cmt-body${looksJson ? ' json' : ''}"
+        style="margin:0;border-radius:0;max-height:420px;overflow:auto">${
+        esc(a.result_full || 'No result recorded — the agent may not have completed.')}</pre>
+    </details>`;
+}
+
+views.workflow = async (params, sid, wfid) => {
+  const d = await api(`/api/workflows/${sid}/${wfid}`);
+  const agents = d.agents;
+  const sel = params.get('a')
+    || (agents.find(a => a.state === 'running') || agents[0] || {}).id;
+  const t0 = d.start_ts || 0;
+  const t1 = d.counts.running
+    ? Date.now() / 1000
+    : (d.end_ts || t0 + 1);
+  const c = d.counts;
+  const speedup = d.duration_s > 0 ? d.agent_seconds / d.duration_s : 0;
+  const statusPill = c.running
+    ? `<span class="st run"><i></i>${c.running} running</span>`
+    : c.done === c.total ? '<span class="st ok"><i></i>completed</span>'
+    : `<span class="st done"><i></i>${c.done}/${c.total} done</span>`;
+
+  $('#view').innerHTML = `
+    <div class="crumb"><a href="#/workflows">Workflows</a> / ${esc(d.short)}</div>
+    <div class="hd">
+      <div><h1>${esc(d.name || d.topic || d.short)} ${statusPill}</h1>
+        <p class="sub">${d.description ? `${esc(d.description)} · ` : ''}${
+          esc(d.project)} · ${dt(d.started)}</p></div>
+      <div class="right">
+        <a class="btn" href="#/session/${esc(d.session_id)}">Session →</a>
+      </div>
+    </div>
+
+    <div class="kpis">
+      ${[[`${c.done}<small>/${c.total}</small>`, 'Agents done',
+          `${c.running} running · ${c.stopped} stopped`],
+         [`×${d.peak_parallelism}`, 'Peak parallelism',
+          `${dur(d.agent_seconds)} of agent time`],
+         [`<span class="dur">${dur(d.duration_s)}</span>`, 'Wall clock',
+          speedup > 1 ? `${speedup.toFixed(1)}× faster than serial` : ''],
+         [usd(d.cost), 'Cost', `${usd(d.cost / (c.total || 1))} avg / agent`],
+         [tok(d.tokens), 'Tokens', `${tok(d.output_tokens)} output`],
+         [`<span class="${d.tool_errors ? 'gdel' : ''}">${d.tool_errors}</span>`,
+          'Tool errors', 'across all agents']]
+        .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
+          <div class="v">${v}</div>
+          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
+    </div>
+
+    ${d.phases.length ? `<div class="phaserow">${d.phases.map((p, i) =>
+      `<span class="phasechip" title="${esc(p.detail)}"><b>${i + 1}</b> ${
+        esc(p.title)}</span>`).join('<i class="phasearrow">→</i>')}</div>` : ''}
+
+    <section class="blk wf-split">
+      <div class="card">
+        <div class="ch"><h2>Timeline</h2>
+          <div class="right">${legend([['done', 'var(--vio)'],
+            ['running', 'var(--gold)'], ['stopped', 'var(--line2)']])}</div></div>
+        <div class="cb">
+          <div id="wfconc"></div>
+          <div id="wfg">${wfGanttHTML(agents, t0, t1, sel)}</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="ch"><h2>Agent</h2><span class="meta">click a bar to inspect</span></div>
+        <div class="cb insp" id="wfinsp"></div>
+      </div>
+    </section>
+
+    ${d.script ? `<section class="blk"><div class="card">
+      <div class="ch"><h2>Script</h2><span class="meta">${esc(d.name)}.js · ${
+        (d.script.length / 1024).toFixed(1)}KB${d.when_to_use
+        ? ` · ${esc(d.when_to_use.slice(0, 90))}` : ''}</span></div>
+      <div class="cb"><details class="dfile"><summary>Show the workflow script</summary>
+        <pre class="cmt-body" style="margin:0;border-radius:0;max-height:560px;overflow:auto">${
+          esc(d.script)}</pre></details></div>
+    </div></section>` : ''}`;
+
+  hydrateTips($('#view'));
+  concChart($('#wfconc'), agents, t0, t1);
+  const paint = aid => {
+    $('#wfinsp').innerHTML =
+      wfInspectorHTML(agents.find(x => x.id === aid), d);
+  };
+  paint(sel);
+  $$('.wfg-row[data-aid]').forEach(el => {
+    const pick = () => {
+      $$('.wfg-row.sel').forEach(x => x.classList.remove('sel'));
+      el.classList.add('sel');
+      const p = new URLSearchParams(location.hash.split('?')[1] || '');
+      p.set('a', el.dataset.aid);
+      history.replaceState(null, '', `#/workflow/${sid}/${wfid}?${p}`);
+      paint(el.dataset.aid);
+    };
+    el.addEventListener('click', pick);
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+    });
+  });
 };
 
 // ── git view ──────────────────────────────────────────────────────────
@@ -2289,7 +2496,7 @@ async function route(silent) {
   const seg = path.split('/').filter(Boolean);
   const name = seg[0] || 'overview';
 
-  const PARENT = { session: 'sessions', agent: 'agents' };
+  const PARENT = { session: 'sessions', agent: 'agents', workflow: 'workflows' };
   const section = PARENT[name] || name;
   $$('.nav a').forEach(a => {
     const on = a.getAttribute('href') === '#/' + section;
@@ -2446,7 +2653,7 @@ fetchPlan();
 setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
-const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows', 'git']);
+const LIVE_PAGES = new Set(['overview', 'sessions', 'agents', 'workflows', 'workflow', 'git']);
 setInterval(() => {
   const page = (location.hash.slice(1) || '/overview')
     .split('?')[0].split('/').filter(Boolean)[0] || 'overview';

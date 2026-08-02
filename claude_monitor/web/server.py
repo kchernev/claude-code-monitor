@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import ipaddress
 import json
+import re
 import threading
 import time
 import urllib.request
@@ -18,7 +19,7 @@ from flask import Flask, jsonify, request
 from .. import analytics, pricing
 from ..gitmon import GitMonitor
 from ..models import AgentRun, Session, _distill_topic
-from ..parser import Corpus
+from ..parser import Corpus, iter_records
 from ..resources import ResourceMonitor, system_snapshot
 
 HERE = Path(__file__).parent
@@ -805,18 +806,43 @@ def create_app(claude_dir: Optional[Path] = None, *,
         return jsonify({"error": "agent not found"}), 404
 
     # -- workflows --------------------------------------------------------
+    def _session_base(sid: str) -> Optional[Path]:
+        for main in store.corpus.projects_dir.glob(f"*/{sid}.jsonl"):
+            return main.parent / sid
+        return None
+
+    def _wf_script_names(sid: str) -> Dict[str, str]:
+        """wf_id -> script name, from the files the Workflow tool persists
+        (``<session>/workflows/scripts/<name>-wf_<id>.js``)."""
+        base = _session_base(sid)
+        out: Dict[str, str] = {}
+        if base is None:
+            return out
+        sdir = base / "workflows" / "scripts"
+        if sdir.is_dir():
+            for f in sdir.glob("*-wf_*.js"):
+                stem = f.stem
+                i = stem.rfind("-wf_")
+                if i > 0:
+                    out[stem[i + 1:]] = stem[:i]
+        return out
+
     @app.route("/api/workflows")
     def api_workflows():
         sessions = filtered(store)
         by_sid = {s.session_id: s for s in sessions}
+        names_cache: Dict[str, Dict[str, str]] = {}
         out = []
         for w in analytics.all_workflows(sessions):
             parent = by_sid.get(w.session_id)
+            if w.session_id not in names_cache:
+                names_cache[w.session_id] = _wf_script_names(w.session_id)
             out.append({
                 "id": w.workflow_id,
                 "short": w.workflow_id.replace("wf_", ""),
                 "session_id": w.session_id,
                 "project": w.project,
+                "name": names_cache[w.session_id].get(w.workflow_id, ""),
                 "topic": w.topic,
                 "agents": len(w.agents),
                 "completed": w.completed,
@@ -887,6 +913,113 @@ def create_app(claude_dir: Optional[Path] = None, *,
         if d is None:
             return jsonify({"error": "unknown commit"}), 404
         return jsonify(d)
+
+    _WF_ID_RE = re.compile(r"^wf_[A-Za-z0-9-]{3,64}$")
+    _META_STR = lambda key, text: next(
+        (m.group(2) for m in re.finditer(
+            r"%s:\s*(['\"])((?:\\.|(?!\1).)*)\1" % key, text)), "")
+
+    @app.route("/api/workflows/<sid>/<wfid>")
+    def api_workflow_detail(sid: str, wfid: str):
+        """Everything about one workflow run, for debugging it.
+
+        Combines three sources: the parsed agent transcripts (timing, cost,
+        tools, prompts), the workflow journal (full per-agent results, not
+        the 2000-char summary the index keeps), and the persisted script —
+        whose meta block names the workflow and declares its phases.
+        """
+        if not _WF_ID_RE.match(wfid):
+            return jsonify({"error": "bad workflow id"}), 404
+        s = store.session(sid)
+        if s is None:
+            return jsonify({"error": "session not found"}), 404
+        agents = [a for a in s.agents if a.workflow_id == wfid]
+        if not agents:
+            return jsonify({"error": "workflow not found"}), 404
+
+        base = _session_base(s.session_id)
+
+        # Full results from the journal — structured returns arrive as JSON
+        # and deserve pretty-printing, not a truncated repr.
+        results: Dict[str, str] = {}
+        if base is not None:
+            journal = base / "subagents" / "workflows" / wfid / "journal.jsonl"
+            if journal.exists():
+                for rec, _off in iter_records(journal):
+                    if rec.get("type") == "result" and rec.get("agentId"):
+                        v = rec.get("result")
+                        text = v if isinstance(v, str) \
+                            else json.dumps(v, indent=2, ensure_ascii=False)
+                        results[rec["agentId"]] = text[:20000]
+
+        # The persisted script: name, description, whenToUse, phases, source.
+        script_text = ""
+        script_name = ""
+        meta_desc = meta_when = ""
+        phases: List[dict] = []
+        if base is not None:
+            sdir = base / "workflows" / "scripts"
+            if sdir.is_dir():
+                for f in sdir.glob(f"*-{wfid}.js"):
+                    script_name = f.stem[: f.stem.rfind("-wf_")]
+                    try:
+                        script_text = f.read_text(errors="replace")[:120000]
+                    except OSError:
+                        pass
+                    break
+        if script_text:
+            head = script_text[:6000]
+            meta_desc = _META_STR("description", head)
+            meta_when = _META_STR("whenToUse", head)
+            for m in re.finditer(
+                r"\{\s*title:\s*'([^']+)'(?:\s*,\s*detail:\s*'([^']*)')?", head
+            ):
+                phases.append({"title": m.group(1), "detail": m.group(2) or ""})
+
+        parent_live = s.is_live
+        rows = []
+        for a in sorted(
+            agents, key=lambda x: x.started.timestamp() if x.started else 0
+        ):
+            d = agent_json(a, parent_live=parent_live, project=s.project)
+            d["prompt"] = (a.prompt or "")[:4000]
+            d["result_full"] = results.get(a.agent_id) \
+                or (a.result or a.final_message or "")[:20000]
+            rows.append(d)
+
+        starts = [a.started for a in agents if a.started]
+        ends = [a.ended for a in agents if a.ended]
+        t0 = min(starts) if starts else None
+        t1 = max(ends) if ends else None
+        states = [r["state"] for r in rows]
+        wf = analytics.all_workflows([s])
+        peak = next(
+            (w.peak_parallelism for w in wf if w.workflow_id == wfid), 0)
+        return jsonify({
+            "id": wfid, "short": wfid.replace("wf_", ""),
+            "session_id": s.session_id, "session_title": s.title,
+            "project": s.project, "session_live": parent_live,
+            "name": script_name, "description": meta_desc,
+            "when_to_use": meta_when, "phases": phases,
+            "script": script_text,
+            "started": iso(t0), "ended": iso(t1),
+            "start_ts": t0.timestamp() if t0 else None,
+            "end_ts": t1.timestamp() if t1 else None,
+            "duration_s": (t1 - t0).total_seconds() if t0 and t1 else 0,
+            "agent_seconds": sum(a.duration_s for a in agents),
+            "peak_parallelism": peak,
+            "cost": sum(a.cost for a in agents),
+            "tokens": sum(a.usage.total for a in agents),
+            "output_tokens": sum(a.usage.output_tokens for a in agents),
+            "tool_errors": sum(a.tool_errors for a in agents),
+            "counts": {
+                "total": len(rows),
+                "done": states.count("done"),
+                "running": states.count("running"),
+                "stopped": states.count("stopped"),
+            },
+            "agents": rows,
+        })
 
     # -- misc -------------------------------------------------------------
     @app.route("/api/reindex", methods=["POST"])
