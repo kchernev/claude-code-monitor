@@ -72,7 +72,9 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
   model, tools, duration and cost. Fan-outs report *peak parallelism*: the most
   agents alive at once, from a sweep over start/end times.
 - **Prompts & files** — what you actually typed (harness-injected text filtered
-  out via `origin.kind`) and which files a session edited.
+  out via `origin.kind`) and which files a session edited. Any session's prompts
+  export to structured JSON or a self-contained HTML page, re-read from the
+  transcript so nothing is truncated.
 - **Resources** — live sessions matched to their OS process by working directory
   and activity window: CPU, RSS, thread count. Concurrent sessions in the same
   directory are disambiguated by recency.
@@ -93,7 +95,7 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
 | **Overview** | Live sessions with CPU/RSS, daily spend, cost composition, weekday×hour heatmap, project and model splits |
 | **Projects** | One card per project; each project's home hub links to its scoped Sessions, Agents, Workflows, Git, Cost and Tools |
 | **Sessions** | Every session, searchable across titles *and prompt text* |
-| **Session** | Context growth, cumulative spend, cost composition, tools, per-model split, subagent table, your prompts, files touched |
+| **Session** | Context growth, cumulative spend, cost composition, tools, per-model split, subagent table, your prompts (exportable as JSON or a standalone HTML page), files touched |
 | **Agents** | Log-scale cost distribution with percentiles, breakdown by type, sortable run table |
 | **Agent** | The exact prompt it was given, what it returned, tools used, cost |
 | **Workflows** | Gantt view of each fan-out — one bar per agent, so parallelism is visible |

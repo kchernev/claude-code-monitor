@@ -1401,7 +1401,17 @@ views.session = async (params, sid) => {
 
     <section class="blk grid cols2">
       <div class="card"><div class="ch"><h2>Your prompts</h2>
-        <span class="meta">${s.prompts.length}</span></div>
+        <div class="chacts">
+          <span class="meta">${s.prompts.length}</span>
+          ${s.prompts.length ? `<a class="btn xs" download
+            href="/api/sessions/${esc(s.id)}/prompts?format=html"
+            data-tip="Download every prompt as a standalone HTML page —
+untruncated, searchable, printable">Export HTML</a>
+          <a class="btn xs" download
+            href="/api/sessions/${esc(s.id)}/prompts?format=json"
+            data-tip="Download every prompt as structured JSON —
+untruncated, with timestamps and per-prompt stats">JSON</a>` : ''}
+        </div></div>
         <div class="cb" style="max-height:460px;overflow:auto">
           ${s.prompts.length ? s.prompts.map(p =>
             `<div class="prompt"><span class="when">${dt(p.ts)}</span>${

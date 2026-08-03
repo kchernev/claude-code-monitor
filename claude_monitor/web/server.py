@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, request
 
+from . import export
 from .. import analytics, pricing
 from ..gitmon import GitMonitor
 from ..models import AgentRun, Session, _distill_topic
@@ -690,6 +691,26 @@ def create_app(claude_dir: Optional[Path] = None, *,
             "hourly": _hourly_buckets(s),
         })
         return jsonify(base)
+
+    @app.route("/api/sessions/<sid>/prompts")
+    def api_session_prompts(sid: str):
+        """Download every prompt of one session as JSON or a standalone page.
+
+        Served as an attachment so the browser writes a file rather than
+        rendering transcript text on this origin.
+        """
+        s = store.session(sid)
+        if s is None:
+            return jsonify({"error": "not found"}), 404
+        fmt = (request.args.get("format") or "json").strip().lower()
+        if fmt not in ("json", "html"):
+            return jsonify({"error": "format must be json or html"}), 400
+        body, mime, name = export.build(s, fmt)
+        resp = app.make_response(body)
+        resp.mimetype = mime.split(";")[0].strip()
+        resp.headers["Content-Type"] = mime
+        resp.headers["Content-Disposition"] = f'attachment; filename="{name}"'
+        return resp
 
     @app.route("/api/sessions/<sid>/tool-calls")
     def api_tool_calls(sid: str):
