@@ -20,7 +20,7 @@ from . import export
 from .. import analytics, pricing
 from ..gitmon import GitMonitor
 from ..models import AgentRun, Session, _distill_topic
-from ..parser import Corpus, iter_records
+from ..parser import Corpus, iter_records, tool_call_text
 from ..resources import ResourceMonitor, system_snapshot
 
 HERE = Path(__file__).parent
@@ -380,6 +380,8 @@ def session_brief(s: Session) -> dict:
         "output_tps": s.output_tps,
         "tool_errors": s.tool_errors,
         "live": s.is_live,
+        # What the session is doing right now; None unless live.
+        "activity": s.activity(),
         "pid": s.pid,
         "cpu": s.cpu_percent,
         "rss": s.rss_bytes,
@@ -1100,7 +1102,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
                                 continue
                             seen.add(tid)
                             name, inp = pending.get(tid, ("?", None))
-                            primary, _sub = _tool_call_text(name, inp)
+                            primary, _sub = tool_call_text(name, inp)
                             errors.append({
                                 "agent_id": aid,
                                 "agent": topics.get(aid, aid[:8]),
@@ -1140,35 +1142,6 @@ def create_app(claude_dir: Optional[Path] = None, *,
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _tool_call_text(name: str, inp) -> tuple:
-    """(primary, secondary) line summarizing a tool_use input for display."""
-    if not isinstance(inp, dict):
-        return (str(inp)[:400], "")
-    if name == "Bash":
-        return ((inp.get("command") or "").strip()[:600],
-                (inp.get("description") or "")[:120])
-    if name in ("Read", "Write", "Edit", "NotebookEdit"):
-        return (inp.get("file_path") or "", "")
-    if name == "Glob":
-        return (inp.get("pattern") or "", inp.get("path") or "")
-    if name == "Grep":
-        return (inp.get("pattern") or "", inp.get("path") or inp.get("glob") or "")
-    if name == "WebFetch":
-        return (inp.get("url") or "", (inp.get("prompt") or "")[:120])
-    if name == "WebSearch":
-        return (inp.get("query") or "", "")
-    if name in ("Agent", "Task"):
-        return (inp.get("description") or "", (inp.get("prompt") or "")[:160])
-    if name == "Skill":
-        return (inp.get("skill") or "", str(inp.get("args") or "")[:120])
-    if name == "TodoWrite":
-        return (f"{len(inp.get('todos') or [])} todo items", "")
-    try:
-        return (json.dumps(dict(list(inp.items())[:4]), default=str)[:300], "")
-    except Exception:
-        return (str(inp)[:300], "")
 
 
 def _extract_tool_calls(projects_dir: Path, s: Session, tool: str,
@@ -1224,7 +1197,7 @@ def _extract_tool_calls(projects_dir: Path, s: Session, tool: str,
                                 if bid in seen:
                                     continue
                                 seen.add(bid)
-                                text, sub = _tool_call_text(tool, block.get("input"))
+                                text, sub = tool_call_text(tool, block.get("input"))
                                 calls.append({
                                     "id": bid,
                                     "ts": rec.get("timestamp"),

@@ -315,6 +315,12 @@ class Session:
     # Wall-clock seconds Claude spent generating, from turn_duration records.
     active_seconds: float = 0.0
 
+    # Transcript-tail state for live-activity classification: the last
+    # meaningful record ({"kind", "stop", "ts"}) and any tool calls that have
+    # not returned a result yet ([{"name", "text", "sub", "ts"}]).
+    tail: dict = field(default_factory=dict)
+    pending_tools: List[dict] = field(default_factory=list)
+
     # Populated at runtime by the resource monitor, not by the parser.
     pid: Optional[int] = None
     cpu_percent: float = 0.0
@@ -325,6 +331,81 @@ class Session:
     @property
     def is_live(self) -> bool:
         return self.pid is not None
+
+    def activity(self) -> Optional[dict]:
+        """What the session is doing right now; None unless it is live.
+
+        Read from the transcript tail: a tool_use with no tool_result yet is a
+        tool still executing (or parked on a permission prompt); a trailing
+        tool_result or user message means the model is computing its next
+        step; an assistant record that stopped with end_turn means the turn is
+        over and the session is waiting on the user.
+        """
+        if not self.is_live:
+            return None
+        now = datetime.now(timezone.utc).timestamp()
+        idle = (now - self.ended.timestamp()) if self.ended else None
+
+        def entry(state: str, label: str, detail: str = "", sub: str = "",
+                  since: Optional[float] = None) -> dict:
+            return {
+                "state": state,
+                "label": label,
+                "detail": detail,
+                "sub": sub,
+                "since_s": max(0.0, now - since) if since else None,
+                "idle_s": idle,
+                # A working state that has written nothing for this long is
+                # usually parked on a permission prompt or was abandoned.
+                "stalled": bool(
+                    state != "waiting" and idle is not None and idle > 900
+                ),
+            }
+
+        tail = self.tail or {}
+        kind = tail.get("kind")
+        ts = tail.get("ts")
+        # A cleanly ended or interrupted turn cannot still be running tools —
+        # anything left open is a leftover from a killed process, not work.
+        turn_over = kind == "interrupt" or (
+            kind == "assistant"
+            and tail.get("stop") in ("end_turn", "stop_sequence")
+        )
+        if not turn_over:
+            # Ignore ancient leftovers a crash never resolved: no tool the
+            # harness runs in the foreground lives this long.
+            fresh = [t for t in self.pending_tools
+                     if t.get("ts") and now - t["ts"] < 7200]
+            if fresh:
+                t = fresh[-1]
+                others = len(fresh) - 1
+                label = f"running {t.get('name') or 'a tool'}"
+                if others:
+                    label += f" +{others} more"
+                return entry("tool", label, t.get("text") or "",
+                             t.get("sub") or "", t.get("ts"))
+        if kind == "interrupt":
+            return entry("waiting", "interrupted — waiting for you", since=ts)
+        if kind == "result":
+            # The CLI flushes a tool_use record only together with its result,
+            # so mid-turn the just-returned tool is the freshest evidence of
+            # what the session is working on.
+            tool = tail.get("tool") or {}
+            if tool.get("name"):
+                return entry("thinking", f"working — after {tool['name']}",
+                             tool.get("text") or "", tool.get("sub") or "", ts)
+            return entry("thinking", "processing tool results", since=ts)
+        if kind == "prompt":
+            return entry("thinking", "working on the prompt", since=ts)
+        if kind == "assistant" and not turn_over:
+            e = entry("responding", "writing a response", since=ts)
+            if e["since_s"] is not None and e["since_s"] > 45:
+                # Text chunks land every few seconds while genuinely writing;
+                # a long quiet stretch mid-turn is usually an unflushed tool
+                # call still executing.
+                e["label"] = "working — running a tool or thinking"
+            return e
+        return entry("waiting", "waiting for your input", since=ts)
 
     @property
     def duration_s(self) -> float:

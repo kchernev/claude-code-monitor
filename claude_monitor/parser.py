@@ -27,8 +27,9 @@ from .models import AgentRun, ApiCall, ModelStat, Session, Usage, _utc
 # no parser version of their own, so a stale format would silently disagree
 # with freshly parsed sessions. v9: injected-prefix screening for list-form
 # user records. v10: timeline points carry uncached cost, so daily attribution
-# can be exact per call.
-CACHE_VERSION = 10
+# can be exact per call. v11: transcript-tail activity state (tail +
+# pending_tools), for the live "what is it doing" readout.
+CACHE_VERSION = 11
 
 # Unique-per-record fallback identity. Never reuse ``id(rec)`` here: CPython
 # recycles addresses as records are garbage-collected between iterations, so
@@ -170,6 +171,52 @@ def _apply_assistant(
              call.cost, uncached)
         )
     return call
+
+
+def tool_call_text(name: str, inp) -> tuple:
+    """(primary, secondary) line summarizing a tool_use input for display."""
+    if not isinstance(inp, dict):
+        return (str(inp)[:400], "")
+    if name == "Bash":
+        return ((inp.get("command") or "").strip()[:600],
+                (inp.get("description") or "")[:120])
+    if name in ("Read", "Write", "Edit", "NotebookEdit"):
+        return (inp.get("file_path") or "", "")
+    if name == "Glob":
+        return (inp.get("pattern") or "", inp.get("path") or "")
+    if name == "Grep":
+        return (inp.get("pattern") or "", inp.get("path") or inp.get("glob") or "")
+    if name == "WebFetch":
+        return (inp.get("url") or "", (inp.get("prompt") or "")[:120])
+    if name == "WebSearch":
+        return (inp.get("query") or "", "")
+    if name in ("Agent", "Task"):
+        return (inp.get("description") or "", (inp.get("prompt") or "")[:160])
+    if name == "Skill":
+        return (inp.get("skill") or "", str(inp.get("args") or "")[:120])
+    if name == "TodoWrite":
+        return (f"{len(inp.get('todos') or [])} todo items", "")
+    try:
+        return (json.dumps(dict(list(inp.items())[:4]), default=str)[:300], "")
+    except Exception:
+        return (str(inp)[:300], "")
+
+
+# The marker Claude Code writes when the user presses Esc mid-turn; it can
+# appear as plain user text or inside a synthetic tool_result.
+_INTERRUPT_MARK = "[Request interrupted"
+
+
+def _result_head(block: dict) -> str:
+    """First chunk of a tool_result block's text, whatever shape it takes."""
+    c = block.get("content")
+    if isinstance(c, str):
+        return c[:200]
+    if isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get("type") == "text":
+                return (b.get("text") or "")[:200]
+    return ""
 
 
 def _count_tool_errors(rec: dict) -> int:
@@ -348,6 +395,12 @@ def parse_session_file(path: Path) -> Session:
     # toolUseId -> Agent tool input, resolved to an agentId by the tool result.
     pending_agent_calls: Dict[str, dict] = {}
 
+    # Tail-of-transcript state: which tool calls have no result yet, and what
+    # the last meaningful record was. Whatever survives to EOF is what the
+    # session is doing right now.
+    open_tools: Dict[str, dict] = {}
+    tail: dict = {}
+
     for rec, _ in iter_records(path):
         rtype = rec.get("type")
         ts = _utc(rec.get("timestamp"))
@@ -368,15 +421,26 @@ def parse_session_file(path: Path) -> Session:
             call = _apply_assistant(rec, sess, sess.timeline, seen=seen)
             if call:
                 sess.peak_context = max(sess.peak_context, call.context_tokens)
+                tail = {"kind": "assistant", "stop": call.stop_reason,
+                        "ts": ts.timestamp() if ts else None}
                 msg = rec.get("message") or {}
                 content = msg.get("content")
                 if isinstance(content, list):
                     for block in content:
-                        if (
+                        if not (
                             isinstance(block, dict)
                             and block.get("type") == "tool_use"
-                            and block.get("name") == "Agent"
                         ):
+                            continue
+                        name = block.get("name") or "?"
+                        primary, sub = tool_call_text(name, block.get("input"))
+                        open_tools[block.get("id") or ""] = {
+                            "name": name,
+                            "text": primary[:200],
+                            "sub": sub[:120],
+                            "ts": ts.timestamp() if ts else None,
+                        }
+                        if name == "Agent":
                             pending_agent_calls[block.get("id") or ""] = (
                                 block.get("input") or {}
                             )
@@ -387,6 +451,47 @@ def parse_session_file(path: Path) -> Session:
                 continue
             if rec.get("uuid"):
                 seen.add(ukey)
+
+            # Tail classification: results close their pending tool calls; an
+            # interrupt kills the whole in-flight turn; anything else is input
+            # the model is about to work on.
+            content = (rec.get("message") or {}).get("content")
+            interrupted = False
+            had_result = False
+            closed_tool = None
+            if isinstance(content, str):
+                interrupted = content.lstrip().startswith(_INTERRUPT_MARK)
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_result":
+                        had_result = True
+                        done = open_tools.pop(block.get("tool_use_id") or "",
+                                              None)
+                        if done is not None:
+                            closed_tool = done
+                        if _result_head(block).lstrip().startswith(
+                                _INTERRUPT_MARK):
+                            interrupted = True
+                    elif block.get("type") == "text" and (
+                            block.get("text") or "").lstrip().startswith(
+                                _INTERRUPT_MARK):
+                        interrupted = True
+            if interrupted:
+                open_tools.clear()
+                tail = {"kind": "interrupt",
+                        "ts": ts.timestamp() if ts else None}
+            elif had_result:
+                tail = {"kind": "result", "ts": ts.timestamp() if ts else None}
+                if closed_tool:
+                    # Which tool just came back — the CLI flushes a tool_use
+                    # record only together with its result, so this is often
+                    # the freshest "what is it doing" evidence there is.
+                    tail["tool"] = closed_tool
+            else:
+                tail = {"kind": "prompt", "ts": ts.timestamp() if ts else None}
+
             if _is_human_turn(rec):
                 sess.user_turns += 1
                 text = _prompt_text(rec).strip()
@@ -493,6 +598,13 @@ def parse_session_file(path: Path) -> Session:
         if a.description and label_counts[a.description] > 1:
             a.label_ambiguous = True
 
+    # Keep only the newest few open calls — the activity readout shows the
+    # last one, and a crash can leave arbitrarily many forever-unresolved.
+    sess.pending_tools = sorted(
+        open_tools.values(), key=lambda t: t.get("ts") or 0
+    )[-3:]
+    sess.tail = tail
+
     sess.timeline.sort(key=lambda p: p[0])
     return sess
 
@@ -577,6 +689,8 @@ def session_to_dict(s: Session) -> dict:
         "prompts": s.prompts,
         "files_touched": s.files_touched,
         "timeline": s.timeline,
+        "tail": s.tail,
+        "pending_tools": s.pending_tools,
         "agents": [
             {
                 "agent_id": a.agent_id,
@@ -632,6 +746,8 @@ def session_from_dict(d: dict) -> Session:
         prompts=d.get("prompts", []),
         files_touched=d.get("files_touched", {}),
         timeline=[tuple(p) for p in d.get("timeline", [])],
+        tail=d.get("tail") or {},
+        pending_tools=d.get("pending_tools") or [],
     )
     for a in d.get("agents", []):
         s.agents.append(

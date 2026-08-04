@@ -217,6 +217,21 @@ class Dashboard:
             base = "" if is_live else C_DIM
 
             topic = s.title or _truncate(s.last_prompt, 60) or s.session_id[:8]
+            # A live session shows what it is doing right now ahead of its
+            # title — that is the thing you watch this dashboard for.
+            act = s.activity() if is_live else None
+            if act:
+                doing = act["label"] + (f" · {act['detail']}" if act["detail"] else "")
+                if act.get("since_s") is not None:
+                    doing += f" ({fmt_duration(act['since_s'])})"
+                topic_cell = Text()
+                busy = act["state"] != "waiting"
+                topic_cell.append("▸ ", style=C_LIVE if busy else C_COST)
+                topic_cell.append(_truncate(doing, 52),
+                                  style=C_LIVE if busy else C_COST)
+                topic_cell.append(f"  {_truncate(topic, 40)}", style=C_DIM)
+            else:
+                topic_cell = Text(_truncate(topic, 70), style=base or C_TEXT)
             model = pricing.display_name(s.primary_model)
             u = s.total_usage
 
@@ -240,7 +255,7 @@ class Dashboard:
             t.add_row(
                 dot,
                 Text(_truncate(s.project, 16), style=base or C_TEXT),
-                Text(_truncate(topic, 70), style=base or C_TEXT),
+                topic_cell,
                 Text(_truncate(model, 12), style=C_DIM if base else _model_style(s.primary_model)),
                 Text(pricing.fmt_tokens(u.total), style=base or C_TEXT),
                 Text(pricing.fmt_tokens(ctx), style=ctx_style),

@@ -239,7 +239,35 @@ a.btn.xs,button.btn.xs{padding:4px 10px;font-size:11.5px;border-radius:8px}
 .st.done{color:var(--done);background:var(--done-bg)}
 .st.run{color:var(--amber);background:var(--amber-bg)}
 .st.ok{color:var(--green);background:var(--green-bg)}
+.st.wait{color:var(--amber);background:var(--amber-bg)}
+.st.wait i{animation:pulse 1.9s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* live-activity readout: what a live session is doing right now */
+.actline{display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11.5px;
+         font-weight:600;color:var(--green);max-width:420px;overflow:hidden;
+         white-space:nowrap}
+.actline i{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none;
+           animation:pulse 1.9s ease-in-out infinite}
+.actline.waiting{color:var(--amber)}
+.actline.waiting i{animation:none;opacity:.55}
+.actline code{font-family:var(--mono);font-weight:500;font-size:11px;
+              background:var(--panel2);border-radius:5px;padding:1px 6px;
+              color:var(--ink2);overflow:hidden;text-overflow:ellipsis;
+              max-width:260px}
+.actline .asince{color:var(--ink3);font-weight:500;
+                 font-variant-numeric:tabular-nums}
+.actline .astall{color:var(--amber);font-weight:700;cursor:help}
+.actline .mut{font-weight:500}
+
+/* session-detail live strip */
+.livebar{display:flex;align-items:center;gap:12px;margin:0 0 16px;
+         padding:10px 16px;border:1px solid var(--line);border-radius:12px;
+         background:var(--green-bg)}
+.livebar.waiting{background:var(--amber-bg)}
+.livebar .actline{margin-top:0;font-size:13px;max-width:none;flex:1;min-width:0}
+.livebar .actline code{max-width:56ch;font-size:12px}
+.livebar .lbmeta{color:var(--ink3);font-size:11.5px;white-space:nowrap}
 
 .mchip{font-family:var(--mono);font-size:11px;border:1px solid var(--line);
        border-radius:8px;padding:3px 9px;font-weight:600;color:var(--ink2);

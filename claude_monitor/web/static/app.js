@@ -663,9 +663,33 @@ function divChart(host, rows, opts = {}) {
 
 // ── status helpers ────────────────────────────────────────────────────
 function sessStatus(s) {
-  if (s.live) return { cls: 'live', label: 'Live' };
+  if (s.live) {
+    const a = s.activity;
+    if (a && a.state === 'waiting') return { cls: 'wait', label: 'Waiting' };
+    if (a && a.stalled) return { cls: 'wait', label: 'Stalled?' };
+    if (a) return { cls: 'live', label: 'Working' };
+    return { cls: 'live', label: 'Live' };
+  }
   const age = s.ended ? (Date.now() - new Date(s.ended).getTime()) / 1000 : Infinity;
   return age < 86400 ? { cls: 'idle', label: 'Idle' } : { cls: 'done', label: 'Done' };
+}
+/** Live-activity line: what a live session is doing right now, read from the
+    transcript tail. mode 'row' is compact for table cells, 'bar' is the
+    session-detail strip. poll() re-renders these in place every 3s and a 1s
+    ticker advances the elapsed counter between polls. */
+function actHTML(s, mode = 'row') {
+  const a = s.activity;
+  if (!s.live || !a) return '';
+  const cut = mode === 'bar' ? 160 : 60;
+  const detail = a.detail ? ` <code title="${esc(a.sub || a.detail)}">${
+    esc(a.detail.length > cut ? a.detail.slice(0, cut) + '…' : a.detail)}</code>` : '';
+  const since = a.since_s != null ? ` — <span class="asince" data-since="${
+    Math.round(Date.now() / 1000 - a.since_s)}">${dur(Math.max(1, a.since_s))}</span>` : '';
+  const stalled = a.stalled ? ` <span class="astall" title="No transcript writes for 15+ minutes — probably waiting for a permission approval, or abandoned">stalled?</span>` : '';
+  const agents = s.agents_running ? ` <span class="mut">· ${s.agents_running} agent${
+    s.agents_running > 1 ? 's' : ''} running</span>` : '';
+  return `<span class="actline ${esc(a.state)}" data-actsid="${esc(s.id)}" data-actmode="${
+    mode}"><i></i>${esc(a.label)}${detail}${since}${stalled}${agents}</span>`;
 }
 const stPill = st => `<span class="st ${st.cls}"><i></i>${st.label}</span>`;
 const AGENT_ST = { running: ['run', 'Running'], done: ['ok', 'Done'],
@@ -888,7 +912,7 @@ views.overview = async () => {
     return {
       _href: `#/session/${s.id}`,
       av: avatar(s.project),
-      sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>`,
+      sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>${actHTML(s)}`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
       tk: tok(s.tokens), ag: agentsCell(s),
       cost: usd(s.cost), st: stPill(st),
@@ -1109,7 +1133,7 @@ views.project = async (params, nameEnc) => {
     const st = sessStatus(s);
     return {
       _href: `#/session/${s.id}`,
-      sess: `<b>${esc(s.title)}</b>`,
+      sess: `<b>${esc(s.title)}</b>${actHTML(s)}`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
       tk: tok(s.tokens), ag: agentsCell(s),
       cost: usd(s.cost), st: stPill(st),
@@ -1230,7 +1254,7 @@ views.sessions = async (params) => {
     return {
       _href: `#/session/${s.id}`,
       id: `#${esc(s.short.slice(0, 6))}`,
-      sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>`,
+      sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>${actHTML(s)}`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
       turns: s.turns, calls: s.api_calls.toLocaleString(),
       ag: agentsCell(s), tk: tok(s.tokens), cx: tok(s.peak_context),
@@ -1314,6 +1338,10 @@ views.session = async (params, sid) => {
         `<span class="mchip">PID ${s.pid} · ${s.cpu.toFixed(0)}% CPU · ${
           (s.rss / 1048576).toFixed(0)} MB</span>` : ''}</div>
     </div>
+
+    ${s.live && s.activity ? `<div class="livebar ${esc(s.activity.state)}"
+        data-livebar="${esc(s.id)}">${actHTML(s, 'bar')}
+      <span class="lbmeta">last write ${ago(s.ended)}</span></div>` : ''}
 
     <div class="kpis">
       ${[[usd(s.cost), 'Total cost', `${usd(s.cost_main)} main + ${usd(s.cost_agents)} agents`],
@@ -2910,6 +2938,24 @@ async function poll() {
       return;
     }
     state.live = d;
+
+    // Repaint live-activity lines in place — the 12s page refresh is far too
+    // slow for "what is it doing right now".
+    const byId = new Map(d.live.map(s => [s.id, s]));
+    $$('[data-actsid]').forEach(el => {
+      const s = byId.get(el.dataset.actsid);
+      if (s && s.activity) {
+        const t = document.createElement('template');
+        t.innerHTML = actHTML(s, el.dataset.actmode || 'row').trim();
+        el.replaceWith(t.content.firstElementChild);
+      } else el.remove();   // went idle; the periodic refresh fixes the pill
+    });
+    $$('[data-livebar]').forEach(el => {
+      const s = byId.get(el.dataset.livebar);
+      if (s && s.activity) el.className = `livebar ${s.activity.state}`;
+      else el.remove();
+    });
+
     const n = d.live.length;
     const tps = d.tps_now != null ? d.tps_now
       : d.live.reduce((a, s) => a + (s.output_tps || 0), 0);
@@ -2998,12 +3044,19 @@ syncThemeBtn();
 
 poll();
 setInterval(poll, 3000);
+// Tick the activity elapsed counters between polls so they read as live.
+setInterval(() => {
+  $$('.asince[data-since]').forEach(el => {
+    const t0 = +el.dataset.since;
+    if (t0) el.textContent = dur(Math.max(1, Date.now() / 1000 - t0));
+  });
+}, 1000);
 fetchPlan();
 setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
 const LIVE_PAGES = new Set(['overview', 'projects', 'project', 'sessions',
-  'agents', 'workflows', 'workflow', 'git']);
+  'session', 'agents', 'workflows', 'workflow', 'git']);
 setInterval(() => {
   const page = (location.hash.slice(1) || '/overview')
     .split('?')[0].split('/').filter(Boolean)[0] || 'overview';
