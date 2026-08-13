@@ -277,14 +277,54 @@ a.btn.xs,button.btn.xs{padding:4px 10px;font-size:11.5px;border-radius:8px}
 .actline .astall{color:var(--amber);font-weight:700;cursor:help}
 .actline .mut{font-weight:500}
 
-/* session-detail live strip */
-.livebar{display:flex;align-items:center;gap:12px;margin:0 0 16px;
-         padding:10px 16px;border:1px solid var(--line);border-radius:12px;
-         background:var(--green-bg)}
-.livebar.waiting{background:var(--amber-bg)}
-.livebar .actline{margin-top:0;font-size:13px;max-width:none;flex:1;min-width:0}
-.livebar .actline code{max-width:56ch;font-size:12px}
-.livebar .lbmeta{color:var(--ink3);font-size:11.5px;white-space:nowrap}
+/* session-page "happening now" panel: what exactly it is waiting on */
+.nowpanel{margin:0 0 16px;border:1px solid var(--line);border-radius:12px;
+          background:var(--card);box-shadow:var(--sh);overflow:hidden}
+.np-head{display:flex;align-items:center;gap:9px;padding:10px 16px;
+         background:var(--green-bg);color:var(--green);font-size:13px;
+         font-weight:600}
+.nowpanel.waiting .np-head{background:var(--amber-bg);color:var(--amber)}
+.np-title b{font-weight:800}
+.np-dot i{display:block;width:7px;height:7px;border-radius:50%;
+          background:currentColor;animation:pulse 1.9s ease-in-out infinite}
+.nowpanel.waiting .np-dot i{animation:none;opacity:.55}
+.np-head .asince{color:inherit;opacity:.8;font-weight:600;
+                 font-variant-numeric:tabular-nums}
+.np-meta{margin-left:auto;color:var(--ink3);font-size:11.5px;font-weight:500;
+         white-space:nowrap}
+.np-body{padding:11px 16px 12px;display:flex;flex-direction:column;gap:8px}
+.np-row{display:flex;align-items:baseline;gap:10px;min-width:0}
+.np-badge{font-family:var(--mono);font-size:10.5px;font-weight:700;flex:none;
+          border:1px solid var(--line2);border-radius:6px;padding:2px 7px;
+          color:var(--ink2);background:var(--panel2)}
+.np-row code{font-family:var(--mono);font-size:12px;color:var(--ink);
+             background:var(--panel2);border-radius:6px;padding:3px 9px;
+             overflow-wrap:anywhere;white-space:pre-wrap;min-width:0;flex:1;
+             max-height:76px;overflow:auto}
+.np-desc{color:var(--ink3);font-size:11.5px;flex:none;max-width:26ch;
+         overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.np-row .asince{color:var(--ink2);font-size:11.5px;font-weight:700;flex:none;
+                font-variant-numeric:tabular-nums}
+.np-row.done code{color:var(--ink3)}
+.np-ret{color:var(--green);font-size:11.5px;font-weight:700;flex:none}
+.np-ctx{font-size:12px;color:var(--ink3)}
+.np-ctx q{quotes:'“' '”';color:var(--ink2);font-style:italic}
+.np-agents{display:flex;align-items:center;flex-wrap:wrap;gap:8px;
+           font-size:11.5px}
+.np-agk{display:inline-flex;align-items:center;gap:6px;color:var(--gold);
+        font-weight:700}
+.np-agk i{width:5px;height:5px;border-radius:50%;background:currentColor;
+          animation:pulse 1.9s ease-in-out infinite}
+.np-agent{display:inline-flex;align-items:center;gap:6px;font-weight:600;
+          border:1px solid var(--line);border-radius:99px;padding:3px 10px;
+          color:var(--ink2);background:var(--panel2);max-width:100%;
+          overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.np-agent:hover{border-color:var(--vio)}
+.np-agent .asince{color:var(--ink3);font-weight:500;
+                  font-variant-numeric:tabular-nums}
+.np-stall{padding:8px 16px;background:var(--amber-bg);color:var(--amber);
+          font-size:12px;font-weight:600;border-top:1px solid var(--line)}
+@media (max-width:760px){.np-desc{display:none}}
 
 .mchip{font-family:var(--mono);font-size:11px;border:1px solid var(--line);
        border-radius:8px;padding:3px 9px;font-weight:600;color:var(--ink2);

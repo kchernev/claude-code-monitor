@@ -346,9 +346,14 @@ class Session:
         now = datetime.now(timezone.utc).timestamp()
         idle = (now - self.ended.timestamp()) if self.ended else None
 
+        # What the turn is answering — context for every non-waiting state.
+        prompt = (self.last_prompt or "").strip()
+        if not prompt and self.prompts:
+            prompt = (self.prompts[-1].get("text") or "").strip()
+
         def entry(state: str, label: str, detail: str = "", sub: str = "",
-                  since: Optional[float] = None) -> dict:
-            return {
+                  since: Optional[float] = None, **extra) -> dict:
+            d = {
                 "state": state,
                 "label": label,
                 "detail": detail,
@@ -361,6 +366,10 @@ class Session:
                     state != "waiting" and idle is not None and idle > 900
                 ),
             }
+            if state != "waiting" and prompt:
+                d["prompt"] = prompt[:180]
+            d.update(extra)
+            return d
 
         tail = self.tail or {}
         kind = tail.get("kind")
@@ -383,7 +392,16 @@ class Session:
                 if others:
                     label += f" +{others} more"
                 return entry("tool", label, t.get("text") or "",
-                             t.get("sub") or "", t.get("ts"))
+                             t.get("sub") or "", t.get("ts"),
+                             # Every in-flight call, oldest first — so the UI
+                             # can show them all, not just the newest.
+                             tools=[{
+                                 "name": p.get("name") or "?",
+                                 "text": p.get("text") or "",
+                                 "sub": p.get("sub") or "",
+                                 "since_s": (max(0.0, now - p["ts"])
+                                             if p.get("ts") else None),
+                             } for p in fresh])
         if kind == "interrupt":
             return entry("waiting", "interrupted — waiting for you", since=ts)
         if kind == "result":
@@ -393,7 +411,8 @@ class Session:
             tool = tail.get("tool") or {}
             if tool.get("name"):
                 return entry("thinking", f"working — after {tool['name']}",
-                             tool.get("text") or "", tool.get("sub") or "", ts)
+                             tool.get("text") or "", tool.get("sub") or "", ts,
+                             tool_name=tool["name"])
             return entry("thinking", "processing tool results", since=ts)
         if kind == "prompt":
             return entry("thinking", "working on the prompt", since=ts)

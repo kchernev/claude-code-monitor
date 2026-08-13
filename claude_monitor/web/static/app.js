@@ -697,22 +697,82 @@ function sessStatus(s) {
   return age < 86400 ? { cls: 'idle', label: 'Idle' } : { cls: 'done', label: 'Done' };
 }
 /** Live-activity line: what a live session is doing right now, read from the
-    transcript tail. mode 'row' is compact for table cells, 'bar' is the
-    session-detail strip. poll() re-renders these in place every 3s and a 1s
-    ticker advances the elapsed counter between polls. */
-function actHTML(s, mode = 'row') {
+    transcript tail. Compact, for table cells. poll() re-renders these in
+    place every 3s and a 1s ticker advances the elapsed counter between polls. */
+function actHTML(s) {
   const a = s.activity;
   if (!s.live || !a) return '';
-  const cut = mode === 'bar' ? 160 : 60;
   const detail = a.detail ? ` <code title="${esc(a.sub || a.detail)}">${
-    esc(a.detail.length > cut ? a.detail.slice(0, cut) + '…' : a.detail)}</code>` : '';
-  const since = a.since_s != null ? ` — <span class="asince" data-since="${
-    Math.round(Date.now() / 1000 - a.since_s)}">${dur(Math.max(1, a.since_s))}</span>` : '';
+    esc(a.detail.length > 60 ? a.detail.slice(0, 60) + '…' : a.detail)}</code>` : '';
+  const since = a.since_s != null ? ` — ${tickSince(a.since_s)}` : '';
   const stalled = a.stalled ? ` <span class="astall" title="No transcript writes for 15+ minutes — probably waiting for a permission approval, or abandoned">stalled?</span>` : '';
   const agents = s.agents_running ? ` <span class="mut">· ${s.agents_running} agent${
     s.agents_running > 1 ? 's' : ''} running</span>` : '';
-  return `<span class="actline ${esc(a.state)}" data-actsid="${esc(s.id)}" data-actmode="${
-    mode}"><i></i>${esc(a.label)}${detail}${since}${stalled}${agents}</span>`;
+  return `<span class="actline ${esc(a.state)}" data-actsid="${esc(s.id)}"><i></i>${
+    esc(a.label)}${detail}${since}${stalled}${agents}</span>`;
+}
+
+/** Elapsed counter that the 1s ticker keeps advancing between polls. */
+const tickSince = sinceS => sinceS == null ? '' :
+  `<span class="asince" data-since="${Math.round(Date.now() / 1000 - sinceS)}">${
+    dur(Math.max(1, sinceS))}</span>`;
+
+/** "Happening now" panel for the session page: exactly what the session is
+    waiting on right now — each in-flight command with its own timer, the
+    result it is chewing on, or the fact that it's your turn — plus the
+    subagents working under it. poll() re-renders it in place every 3s. */
+function nowPanel(s, agents = []) {
+  const a = s.activity;
+  if (!s.live || !a) return '';
+
+  const toolRow = (t, done) => `<div class="np-row${done ? ' done' : ''}">
+      <span class="np-badge">${esc(t.name || '?')}</span>
+      <code>${esc(t.text || '(no arguments)')}</code>
+      ${t.sub ? `<span class="np-desc" title="${esc(t.sub)}">${esc(t.sub)}</span>` : ''}
+      ${done ? '<span class="np-ret">✓ returned</span>' : tickSince(t.since_s)}
+    </div>`;
+
+  const tools = a.tools || [];
+  let title, rows = '';
+  if (a.state === 'tool' && tools.length) {
+    title = tools.length > 1
+      ? `Waiting for <b>${tools.length} tool calls</b> to finish`
+      : `Waiting for <b>${esc(tools[0].name || 'a tool')}</b> to finish`;
+    rows = tools.map(t => toolRow(t, false)).join('');
+  } else if (a.state === 'thinking' && a.tool_name) {
+    title = `Thinking — <b>${esc(a.tool_name)}</b> just returned`;
+    rows = toolRow({ name: a.tool_name, text: a.detail, sub: a.sub }, true);
+  } else if (a.state === 'waiting') {
+    title = a.label.startsWith('interrupted')
+      ? 'Interrupted — waiting for you' : 'Waiting for your input';
+  } else {
+    // "writing a response", "processing tool results", … as a headline.
+    title = esc(a.label.charAt(0).toUpperCase() + a.label.slice(1));
+  }
+
+  const ctx = a.prompt
+    ? `<div class="np-ctx">working on <q>${esc(a.prompt)}</q></div>` : '';
+  const SHOW = 6;
+  const ag = agents.length ? `<div class="np-agents">
+      <span class="np-agk"><i></i>${agents.length} agent${
+        agents.length > 1 ? 's' : ''} running</span>
+      ${agents.slice(0, SHOW).map(x => `<a class="np-agent"
+        href="#/agent/${esc(s.id)}/${esc(x.id)}" title="${esc(x.topic || '')}">${
+        esc((x.topic || x.type || x.id).slice(0, 44))} ${x.started ?
+        tickSince((Date.now() - new Date(x.started).getTime()) / 1000) : ''}</a>`).join('')}
+      ${agents.length > SHOW ? `<span class="mut">+${agents.length - SHOW} more</span>` : ''}
+    </div>` : '';
+  const stall = a.stalled ? `<div class="np-stall">⚠ Nothing written for ${
+      dur(a.idle_s || 900)} — probably parked on a permission prompt in the
+      terminal, or abandoned. Timers keep counting until the CLI writes again.</div>` : '';
+
+  return `<div class="nowpanel ${esc(a.state)}" data-nowpanel="${esc(s.id)}">
+    <div class="np-head"><span class="np-dot"><i></i></span>
+      <span class="np-title">${title}</span>${tickSince(a.since_s)}
+      <span class="np-meta">last write ${ago(s.ended)}</span></div>
+    ${rows || ctx || ag ? `<div class="np-body">${rows}${ctx}${ag}</div>` : ''}
+    ${stall}
+  </div>`;
 }
 const stPill = st => `<span class="st ${st.cls}"><i></i>${st.label}</span>`;
 const AGENT_ST = { running: ['run', 'Running'], done: ['ok', 'Done'],
@@ -1162,9 +1222,7 @@ views.session = async (params, sid) => {
           (s.rss / 1048576).toFixed(0)} MB</span>` : ''}</div>
     </div>
 
-    ${s.live && s.activity ? `<div class="livebar ${esc(s.activity.state)}"
-        data-livebar="${esc(s.id)}">${actHTML(s, 'bar')}
-      <span class="lbmeta">last write ${ago(s.ended)}</span></div>` : ''}
+    ${nowPanel(s, s.agents.filter(a => a.state === 'running'))}
 
     <div class="kpis">
       ${[[usd(s.cost), 'Total cost', `${usd(s.cost_main)} main + ${usd(s.cost_agents)} agents`],
@@ -2531,14 +2589,21 @@ async function poll() {
       const s = byId.get(el.dataset.actsid);
       if (s && s.activity) {
         const t = document.createElement('template');
-        t.innerHTML = actHTML(s, el.dataset.actmode || 'row').trim();
+        t.innerHTML = actHTML(s).trim();
         el.replaceWith(t.content.firstElementChild);
       } else el.remove();   // went idle; the periodic refresh fixes the pill
     });
-    $$('[data-livebar]').forEach(el => {
-      const s = byId.get(el.dataset.livebar);
-      if (s && s.activity) el.className = `livebar ${s.activity.state}`;
-      else el.remove();
+    $$('[data-nowpanel]').forEach(el => {
+      const s = byId.get(el.dataset.nowpanel);
+      // The panel holds copyable commands — never rebuild it mid-selection.
+      const sel = getSelection();
+      if (sel && String(sel) && el.contains(sel.anchorNode)) return;
+      if (s && s.activity) {
+        const t = document.createElement('template');
+        t.innerHTML = nowPanel(s, d.running_agents.filter(
+          a => a.session_id === s.id)).trim();
+        el.replaceWith(t.content.firstElementChild);
+      } else el.remove();   // went idle; the periodic refresh redraws the page
     });
 
     const n = d.live.length;
