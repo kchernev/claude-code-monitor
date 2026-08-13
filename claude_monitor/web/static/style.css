@@ -210,6 +210,23 @@ a.btn.xs,button.btn.xs{padding:4px 10px;font-size:11.5px;border-radius:8px}
 .cols3{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
 .cols4{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
 
+/* A whole section folded behind one bar. Closed it reads as a summary strip;
+   open it hands the space to the cards underneath. */
+.fold>summary{display:flex;align-items:center;gap:10px;cursor:pointer;
+  list-style:none;user-select:none;padding:11px 20px;font-size:14px;font-weight:700;
+  letter-spacing:-.01em;background:var(--card);border:1px solid var(--line);
+  border-radius:var(--r);box-shadow:var(--sh)}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary:hover{background:var(--panel2)}
+.fold>summary .meta{margin-left:auto;font-family:var(--mono);font-size:11.5px;
+  font-weight:400;color:var(--ink3);font-variant-numeric:tabular-nums;
+  text-align:right}
+.fold .caret{width:0;height:0;border-left:5px solid var(--ink3);
+  border-top:4px solid transparent;border-bottom:4px solid transparent;
+  transition:transform .12s;flex:none}
+.fold[open]>summary .caret{transform:rotate(90deg)}
+.fold .foldbody{margin-top:16px}
+
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(186px,1fr));gap:14px;
       margin-bottom:16px}
 .kpi{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
@@ -504,49 +521,6 @@ footer.pagefoot{display:flex;justify-content:space-between;color:var(--ink3);
           align-items:center;gap:8px}
 .repolink:hover{color:var(--vio-text)}
 
-/* ── hierarchical agents list ── */
-.aghead{display:grid;
-  grid-template-columns:76px minmax(220px,1fr) 130px 110px 74px 70px 84px 92px;
-  gap:10px;padding:0 18px 6px;font-family:var(--mono);font-size:10px;
-  letter-spacing:.08em;text-transform:uppercase;color:var(--ink3)}
-.aghead .r{text-align:right}
-.agsess{background:var(--card);border:1px solid var(--line);
-        border-radius:var(--r);margin-bottom:10px;overflow:hidden}
-.agsess>summary{display:flex;align-items:center;gap:11px;padding:11px 16px;
-                cursor:pointer;list-style:none;user-select:none}
-.agsess>summary::-webkit-details-marker{display:none}
-.agsess>summary:hover{background:var(--panel2)}
-.agsess[open]>summary{border-bottom:1px solid var(--line)}
-.agsess .caret{width:0;height:0;border-left:5px solid var(--ink3);
-               border-top:4px solid transparent;border-bottom:4px solid transparent;
-               transition:transform .12s;flex:none}
-.agsess[open] .caret{transform:rotate(90deg)}
-.agsess .av{width:22px;height:22px;font-size:11px;flex:none}
-.agsess .s1{flex:1;min-width:0;display:flex;align-items:baseline;gap:9px}
-.agsess .s1 b{font-size:13px;white-space:nowrap}
-.agsess .s1 .tp{color:var(--ink3);font-size:12px;overflow:hidden;
-                text-overflow:ellipsis;white-space:nowrap}
-.agsess summary .btn{flex:none;padding:3px 10px;font-size:11.5px}
-.agsess summary .num{flex:none}
-.agbody{padding:6px 8px 8px;overflow-x:auto}
-.agrow{display:grid;
-  grid-template-columns:76px minmax(220px,1fr) 130px 110px 74px 70px 84px 92px;
-  gap:10px;align-items:center;padding:5px 10px;border-radius:8px;
-  text-decoration:none;color:inherit;font-size:12.5px;min-width:900px}
-.agrow:hover{background:var(--panel2)}
-.agrow .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-          color:var(--ink)}
-.agrow .t.deep{padding-left:16px}
-.agrow .depthmark{color:var(--ink3);font-style:normal;margin-right:6px}
-.agrow .num,.agrow .dur{text-align:right;font-variant-numeric:tabular-nums}
-.agrow .st{transform:scale(.92);transform-origin:left center}
-.wfgrp{border:1px dashed var(--line2);border-radius:10px;margin:6px 2px;
-       padding:2px 4px 4px}
-.wfhead{display:flex;gap:10px;align-items:center;padding:6px 8px;font-size:12px}
-.wfhead a{margin-left:auto;color:var(--vio-text);text-decoration:none;
-          font-weight:600;font-size:11.5px;white-space:nowrap}
-.wfhead a:hover{text-decoration:underline}
-
 /* ── workflow debugger ── */
 .wf-split{display:grid;grid-template-columns:minmax(480px,1.45fr) minmax(340px,1fr);
           gap:16px;align-items:start}
@@ -614,47 +588,17 @@ footer.pagefoot{display:flex;justify-content:space-between;color:var(--ink3);
   white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow-y:auto;
   color:var(--ink2)}
 
-/* compact stats strip on the agents pages */
-.agstats{display:grid;
-  grid-template-columns:minmax(300px,1.15fr) minmax(240px,1fr);
-  gap:30px;padding:14px 20px 12px;align-items:start}
-.agstats .as-t{font-size:12.5px;font-weight:700;margin-bottom:7px;
-               display:flex;gap:8px;align-items:baseline}
-.agstats .as-t .meta{font-family:var(--mono);font-size:10px;color:var(--ink3);
-                     font-weight:400}
-@media(max-width:1100px){.agstats{grid-template-columns:1fr}}
-
-/* project home section nav + workflow minis */
-.secnav{display:flex;gap:8px;flex-wrap:wrap;margin:2px 0 16px}
-.secnav a{display:inline-flex;align-items:center;gap:7px;background:var(--card);
-  border:1px solid var(--line);border-radius:99px;padding:7px 15px;
-  font-size:12.5px;font-weight:600;color:var(--ink2);text-decoration:none}
-.secnav a:hover{border-color:var(--vio);color:var(--vio-text)}
-.secnav a.on{background:var(--ink);border-color:var(--ink);color:var(--cv)}
-.secnav a.on b{color:var(--cv)}
-.secnav a b{font-family:var(--mono);font-weight:700;color:var(--ink);
-            font-size:11.5px;font-variant-numeric:tabular-nums}
-.wfmini{display:flex;align-items:center;gap:10px;padding:7px 8px;
-  border-radius:8px;text-decoration:none;color:inherit;font-size:12.5px}
-.wfmini:hover{background:var(--panel2)}
-.wfmini .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
-           white-space:nowrap;font-weight:600}
-.wfmini .num,.wfmini .dur{flex:none;font-variant-numeric:tabular-nums}
-
-/* project cards on the agents landing level */
-.projcard{display:block;text-decoration:none;color:inherit;padding:16px 18px;
-          transition:transform .1s,box-shadow .1s}
-.projcard:hover{transform:translateY(-2px);box-shadow:var(--shadow2,0 8px 24px
-                rgba(0,0,0,.08))}
-.pc-head{display:flex;align-items:center;gap:9px}
-.pc-head b{font-size:14px}
-.pc-head .av{width:24px;height:24px;font-size:12px}
-.pc-stats{display:flex;gap:18px;align-items:baseline;margin-top:12px;
-          font-size:12.5px;color:var(--ink2)}
-.pc-stats b{font-size:15px;color:var(--ink)}
-.pc-stats .cost{margin-left:auto;font-weight:700}
-.pc-foot{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);
-         font-size:11.5px;color:var(--ink3)}
+/* workflow fan-outs of a session: progress chips on the Subagents card —
+   name, done/total, running count, cost */
+.wfstrip{display:flex;flex-wrap:wrap;padding:12px 20px 0}
+.wfchip{display:inline-flex;align-items:center;gap:8px;font-size:11.5px;
+  font-weight:600;border:1px solid color-mix(in srgb,var(--vio) 30%,transparent);
+  background:color-mix(in srgb,var(--vio) 8%,var(--card));color:var(--vio-text);
+  border-radius:99px;padding:3px 11px;margin:0 6px 8px 0;text-decoration:none;
+  max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.wfchip:hover{border-color:var(--vio)}
+.wfchip .num{font-size:10.5px}
+.wfchip .agr{font-size:10.5px;gap:4px}
 
 /* ── repo explorer ── */
 .repo-split{display:grid;grid-template-columns:minmax(420px,1fr) minmax(380px,1.1fr);

@@ -420,6 +420,29 @@ function barList(items) {
   }).join('') + '</div>';
 }
 
+// ── remembered fold-away sections ─────────────────────────────────────
+// Secondary detail a reader doesn't need on every visit, folded behind one
+// bar so it stops pushing the important sections below the fold. The summary
+// keeps the headline numbers visible, so folded still says something.
+//
+// The choice lives in localStorage, not in the DOM: the session page swaps
+// its whole DOM every 12s, and remembering per-element would re-open the
+// section on each live refresh. Sticking it also means the next session you
+// open comes up the way you left the last one. Default is folded.
+const foldIsOpen = key => localStorage.getItem('cm.fold.' + key) === '1';
+function foldSection(key, title, meta, body) {
+  return `<details class="fold" data-fold="${esc(key)}"${
+    foldIsOpen(key) ? ' open' : ''}>
+    <summary><span class="caret"></span>${esc(title)}
+      <span class="meta">${meta}</span></summary>
+    <div class="foldbody">${body}</div></details>`;
+}
+function wireFolds(root) {
+  $$('details[data-fold]', root || document).forEach(el =>
+    el.addEventListener('toggle', () =>
+      localStorage.setItem('cm.fold.' + el.dataset.fold, el.open ? '1' : '0')));
+}
+
 /* Modal + tools drill-down: what a tool actually executed, in a popup. */
 function closeModal() {
   const m = $('#modal');
@@ -820,11 +843,8 @@ const SKELETONS = {
 };
 const PAGE = {
   overview:  { title: 'Dashboard', skel: () => SKELETONS.tiles(3) + SKELETONS.card() },
-  projects:  { title: 'Projects',  skel: () => SKELETONS.tiles(6) },
-  project:   { title: 'Project',   skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   sessions:  { title: 'Sessions',  skel: () => SKELETONS.rows(14) },
   session:   { title: 'Session',   skel: () => SKELETONS.tiles(6) + SKELETONS.card() },
-  agents:    { title: 'Agents',    skel: () => SKELETONS.card() + SKELETONS.rows(10) },
   agent:     { title: 'Agent',     skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   workflows: { title: 'Workflows', skel: () => SKELETONS.card() + SKELETONS.card() },
   workflow:  { title: 'Workflow',  skel: () => SKELETONS.tiles(6) + SKELETONS.card() },
@@ -981,7 +1001,7 @@ views.overview = async () => {
       </div>
       <div style="display:flex;flex-direction:column;gap:16px">
         <div class="card">
-          <div class="ch"><h2>Projects</h2><a class="meta" href="#/cost">Cost →</a></div>
+          <div class="ch"><h2>By project</h2><a class="meta" href="#/cost">Cost →</a></div>
           <div class="cb">${barList(foldTail(d.projects.map(p => ({
             label: p.key, value: p.cost, text: usd(p.cost),
             sub: (100 * p.cost / (t.cost || 1)).toFixed(0) + '%',
@@ -1037,212 +1057,9 @@ views.overview = async () => {
   waveChart($('#wave'), daily, { height: 248 });
 };
 
-// ── projects (the primary hierarchy: project → everything scoped) ─────
-
-/** Crumb inside a project: Projects / <name> / trail… */
-function projectCrumb(project, ...trail) {
-  const P = encodeURIComponent(project);
-  return `<div class="crumb"><a href="#/projects">Projects</a> /
-    <a href="#/project/${P}">${esc(project)}</a>${
-    trail.map(t => ` / ${t}`).join('')}</div>`;
-}
-
-/** Section chips shown on every page of a project, current one lit. */
-function projectSecnav(project, active) {
-  const P = encodeURIComponent(project);
-  const items = [['', 'Overview'], ['sessions', 'Sessions'],
-    ['agents', 'Agents'], ['workflows', 'Workflows'],
-    ['cost', 'Cost'], ['tools', 'Tools']];
-  return `<div class="secnav">${items.map(([k, l]) => {
-    const href = k ? `#/${k}?project=${P}` : `#/project/${P}`;
-    const on = active === (k || 'home');
-    return `<a href="${href}" class="${on ? 'on' : ''}">${l}</a>`;
-  }).join('')}</div>`;
-}
-
-views.projects = async () => {
-  const [d, sess] = await Promise.all([
-    api('/api/summary'),
-    api('/api/sessions', { limit: 2000 }),
-  ]);
-  const extra = {};
-  for (const s of sess.sessions) {
-    const e = extra[s.project] || (extra[s.project] = {
-      live: 0, running: 0, last: '' });
-    if (s.live) e.live++;
-    e.running += s.agents_running || 0;
-    if (s.ended && s.ended > e.last) e.last = s.ended;
-  }
-  // Most recently prompted first — the project you're working on is the one
-  // you're looking for, not the historically most expensive one.
-  const ordered = [...d.projects].sort((a, b) => {
-    const la = (extra[a.key] || {}).last || '';
-    const lb = (extra[b.key] || {}).last || '';
-    return lb < la ? -1 : lb > la ? 1 : b.cost - a.cost;
-  });
-  const cards = ordered.map(p => {
-    const e = extra[p.key] || { live: 0, running: 0, last: '' };
-    return `
-    <a class="card projcard" href="#/project/${encodeURIComponent(p.key)}">
-      <div class="pc-head">${avatar(p.key)}<b>${esc(p.key)}</b>
-        ${e.live ? `<span class="st live"><i></i>${e.live} live</span>` : ''}
-      </div>
-      <div class="pc-stats">
-        <span><b class="num">${p.sessions}</b> session${p.sessions === 1 ? '' : 's'}</span>
-        <span><b class="num">${p.agents}</b> agent${p.agents === 1 ? '' : 's'}</span>
-        <span class="num cost">${usd(p.cost)}</span>
-      </div>
-      <div class="pc-foot">${e.running
-        ? `<span class="agr"><i></i>${e.running} agent${
-            e.running === 1 ? '' : 's'} running</span> · ` : ''}last activity ${
-        e.last ? ago(e.last) : '—'} · open →</div>
-    </a>`;
-  }).join('');
-
-  $('#view').innerHTML = `
-    <div class="hd">
-      <div><h1>Projects</h1><p class="sub">${d.projects.length} project${
-        d.projects.length === 1 ? '' : 's'} · ${usd(d.totals.cost)} in the last ${
-        winLabel()}</p></div>
-      <div class="right">${windowPicker()}</div>
-    </div>
-    <div class="gitgrid">${cards ||
-      '<div class="empty"><b>No projects in this window</b>Widen the time window to see older work.</div>'}</div>`;
-  hydrateTips($('#view'));
-  wireWindow($('#view'));
-};
-
-views.project = async (params, nameEnc) => {
-  const name = decodeURIComponent(nameEnc || '');
-  const P = encodeURIComponent(name);
-  const [d, sess, ag, wfs, git] = await Promise.all([
-    api('/api/summary', { project: name }),
-    api('/api/sessions', { project: name, limit: 400 }),
-    api('/api/agents', { project: name, limit: 60 }),
-    api('/api/workflows', { project: name }),
-    api('/api/git', { range: 'all' }).catch(() => null),
-  ]);
-  const t = d.totals;
-  const live = sess.sessions.filter(s => s.live).length;
-  const running = sess.sessions.reduce((a, s) => a + (s.agents_running || 0), 0);
-  const repo = git && git.repos.find(r => r.project === name);
-  const daily = d.daily || [];
-  const windowSpend = daily.reduce((a, r) => a + r.cost, 0);
-
-  const rows = sess.sessions.slice(0, 8).map(s => {
-    const st = sessStatus(s);
-    return {
-      _href: `#/session/${s.id}`,
-      sess: `<b>${esc(s.title)}</b>${actHTML(s)}`,
-      model: `<span class="mchip">${esc(s.model_label)}</span>`,
-      tk: tok(s.tokens), ag: agentsCell(s),
-      cost: usd(s.cost), st: stPill(st),
-      when: `<span class="dur">${ago(s.ended)}</span>`,
-    };
-  });
-
-  const agRows = ag.agents.slice(0, 6).map(a => `
-    <a class="wfmini" href="#/agent/${esc(a.session_id)}/${esc(a.id)}">
-      ${agentPill(a.state)}
-      <span class="t" title="${esc(a.topic)}">${esc(a.topic)}</span>
-      <span class="num cost">${usd(a.cost)}</span>
-      <span class="dur">${ago(a.started)}</span>
-    </a>`).join('');
-
-  const wfRows = wfs.workflows.slice(0, 5).map(w => `
-    <a class="wfmini" href="#/workflow/${esc(w.session_id)}/${esc(w.id)}">
-      <span class="t">${esc(w.name || w.topic)}</span>
-      ${w.running ? `<span class="st run"><i></i>${w.running}</span>` : ''}
-      <span class="mut num">${w.completed}/${w.agents}</span>
-      <span class="num cost">${usd(w.cost)}</span>
-      <span class="dur">${ago(w.started)}</span>
-    </a>`).join('');
-
-  const st0 = repo && repo.stats;
-  $('#view').innerHTML = `
-    <div class="crumb"><a href="#/projects">Projects</a> / ${esc(name)}</div>
-    <div class="hd">
-      <div><h1>${avatar(name)} ${esc(name)}
-        ${live ? `<span class="st live" style="margin-left:8px"><i></i>${
-          live} live</span>` : ''}</h1>
-        <p class="sub">${t.sessions} session${t.sessions === 1 ? '' : 's'} · ${
-          usd(t.cost)} in the last ${winLabel()}</p></div>
-      <div class="right">${windowPicker()}</div>
-    </div>
-
-    <div class="secnav">
-      <a href="#/sessions?project=${P}">Sessions <b>${t.sessions}</b></a>
-      <a href="#/agents?project=${P}">Agents <b>${t.agents}</b></a>
-      <a href="#/workflows?project=${P}">Workflows <b>${wfs.workflows.length}</b></a>
-      ${repo ? `<a href="#/git/repo/${esc(repo.id)}">Git ${st0 && st0.wip
-        ? `<b>${tok(st0.wip)} wip</b>` : ''}</a>` : ''}
-      <a href="#/cost?project=${P}">Cost <b>${usd(t.cost)}</b></a>
-      <a href="#/tools?project=${P}">Tools</a>
-    </div>
-
-    <div class="kpis">
-      ${[[t.sessions, 'Sessions', `${live} live now`],
-         [t.agents, 'Agents', running ? `${running} running now` : 'subagent runs'],
-         [tok(t.tokens), 'Tokens', `${tok(d.economics.tokens.output)} output`],
-         [`${t.savings_pct.toFixed(0)}%`, 'Cache savings', usd(t.savings) + ' saved'],
-         [usd(windowSpend), 'Spend', `in the last ${winLabel()}`]]
-        .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
-          <div class="v">${v}</div>
-          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
-    </div>
-
-    <section class="blk"><div class="card">
-      <div class="ch"><h2>Sessions</h2>
-        <a class="meta" href="#/sessions?project=${P}">all →</a></div>
-      <div class="cb" style="padding:4px 0 0">${table([
-        { h: 'Session', key: 'sess', grow: 1, link: 1 },
-        { h: 'Model', key: 'model' }, { h: 'Tokens', key: 'tk', n: 1 },
-        { h: 'Agents', key: 'ag', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
-        { h: 'Status', key: 'st' }, { h: 'Last write', key: 'when', n: 1 }],
-        rows)}</div>
-    </div></section>
-
-    <section class="blk" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px">
-      ${agRows ? `<div class="card"><div class="ch"><h2>Agents</h2>
-        <a class="meta" href="#/agents?project=${P}">all →</a></div>
-        <div class="cb">${agRows}</div></div>` : ''}
-      ${wfRows ? `<div class="card"><div class="ch"><h2>Workflows</h2>
-        <a class="meta" href="#/workflows?project=${P}">all →</a></div>
-        <div class="cb">${wfRows}</div></div>` : ''}
-    </section>
-
-    <section class="blk" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px">
-      ${repo ? `<div class="card"><div class="ch">
-        <h2><a class="repolink" href="#/git/repo/${esc(repo.id)}">Git — ${
-          esc(repo.name)}</a></h2>
-        <span class="meta">${st0 ? esc(st0.branch) : ''}</span></div>
-        <div class="cb">
-          <div class="gwip">
-            <span class="num" style="font-weight:800;font-size:1.05rem">${
-              st0 ? st0.wip.toLocaleString() : '—'}</span>
-            <span class="mut">uncommitted lines</span>
-            <span class="spk">${sparkSVG((repo.spark || []).map(p => p[1]),
-              90, 24, '#16a34a')}</span>
-          </div>
-          ${st0 && st0.commits.length ? `<div class="gcommits">${
-            st0.commits.slice(0, 3).map(c => `
-            <div class="gcommit"><code>${esc(c.hash)}</code>
-              <span class="cs" title="${esc(c.subject)}">${esc(c.subject)}</span>
-              <span class="dur">${ago(new Date(c.t * 1000).toISOString())}</span>
-            </div>`).join('')}</div>` : ''}
-        </div></div>` : ''}
-      <div class="card"><div class="ch"><h2>Spend per day</h2></div>
-        <div class="cb"><div id="pDaily"></div></div></div>
-    </section>`;
-
-  hydrateTips($('#view'));
-  wireTable($('#view'));
-  wireWindow($('#view'));
-  colChart($('#pDaily'), daily.map(r => ({
-    v: r.cost, label: r.date.slice(5),
-    tip: `${r.date}\n${usd(r.cost)} · ${r.sessions} sessions`,
-  })), { height: 180 });
-};
+// ── crumbs (session-rooted; a project is just a label on a session) ───
+const crumb = (...parts) => `<div class="crumb">${parts.join(' / ')}</div>`;
+const sessionsLink = () => `<a href="#/sessions">Sessions</a>`;
 
 views.sessions = async (params) => {
   const q = params.get('q') || '', project = params.get('project') || '';
@@ -1269,7 +1086,6 @@ views.sessions = async (params) => {
   };
 
   $('#view').innerHTML = `
-    ${project ? projectCrumb(project, 'Sessions') + projectSecnav(project, 'sessions') : ''}
     <div class="hd">
       <div><h1>Sessions${project ? ` — ${esc(project)}` : ''}</h1><p class="sub">${
         d.total} session${
@@ -1315,6 +1131,14 @@ views.sessions = async (params) => {
 
 views.session = async (params, sid) => {
   const s = await api(`/api/sessions/${sid}`);
+  // This session's workflow fan-outs, shown as progress chips on the
+  // Subagents card. The endpoint is project-scoped, so filter to the session;
+  // skip the request entirely when no agent came from a workflow.
+  let sessWfs = [];
+  if (s.agents.some(a => a.workflow_id)) {
+    const wd = await api('/api/workflows', { project: s.project }).catch(() => null);
+    if (wd) sessWfs = wd.workflows.filter(w => w.session_id === s.id);
+  }
   const e = s.economics;
   const st = sessStatus(s);
   const typeRows = [
@@ -1324,11 +1148,10 @@ views.session = async (params, sid) => {
     ['Output', 'output', SERIES[3]],
     ['Input, uncached', 'input', SERIES[4]],
   ];
+  const toolCalls = Object.values(s.tools).reduce((a, b) => a + b, 0);
 
   $('#view').innerHTML = `
-    ${projectCrumb(s.project,
-      `<a href="#/sessions?project=${encodeURIComponent(s.project)}">Sessions</a>`,
-      esc(s.short))}
+    ${crumb(sessionsLink(), esc(s.short))}
     <div class="hd">
       <div><h1>${esc(s.title)}</h1>
         <p class="sub">${esc(s.project)} · ${esc(s.branch || 'no branch')} ·
@@ -1375,7 +1198,11 @@ views.session = async (params, sid) => {
         <div class="cb"><div id="costChart"></div></div></div>
     </section>
 
-    <section class="blk grid cols3">
+    <section class="blk">${foldSection('sess.detail', 'Cost, tools & models',
+      `${usd(s.uncached_cost - s.cost_main)} saved by caching · ${
+        toolCalls.toLocaleString()} tool call${toolCalls === 1 ? '' : 's'} · ${
+        s.models.length} model${s.models.length === 1 ? '' : 's'}`, `
+    <div class="grid cols3">
       <div class="card"><div class="ch"><h2>Cost composition</h2></div>
         <div class="cb">${barList(typeRows.slice()
           .sort((a, b) => e.cost[b[1]] - e.cost[a[1]])
@@ -1393,7 +1220,7 @@ views.session = async (params, sid) => {
           <dt>Avg output rate</dt><dd>${s.output_tps.toFixed(0)} tok/s</dd>
         </dl></div></div>
       <div class="card"><div class="ch"><h2>Tools</h2>
-        <span class="meta">${Object.values(s.tools).reduce((a, b) => a + b, 0)} calls
+        <span class="meta">${toolCalls} calls
           · click one for detail</span></div>
         <div class="cb" id="toolsBody">${barList(foldTail(Object.entries(s.tools)
           .sort((a, b) => b[1] - a[1])
@@ -1406,10 +1233,17 @@ views.session = async (params, sid) => {
             color: SERIES[i % SERIES.length],
             text: usd(m.cost), sub: `${m.calls} calls`, tip: `${tok(m.tokens)} tokens` })))}
         </div></div>
-    </section>
+    </div>`)}</section>
 
     ${s.agents.length ? `<section class="blk"><div class="card">
       <div class="ch"><h2>Subagents</h2><span class="meta">${usd(s.cost_agents)} total</span></div>
+      ${sessWfs.length ? `<div class="wfstrip">${sessWfs.map(w => `
+        <a class="wfchip" href="#/workflow/${esc(w.session_id)}/${esc(w.id)}"
+          title="${esc(w.topic || '')}">⑃ ${
+          esc(w.name || (w.topic ? w.topic.slice(0, 34) : w.short))}
+          <span class="num">${w.completed}/${w.agents}</span>${
+          w.running ? `<span class="agr"><i></i>${w.running}</span>` : ''}
+          <span class="num">${usd(w.cost)}</span></a>`).join('')}</div>` : ''}
       <div class="cb" style="padding:4px 0 0">${table([
         { h: 'Topic', key: 'topic', grow: 1, link: 1 },
         { h: 'Type', key: 'type' }, { h: 'Model', key: 'model' },
@@ -1456,6 +1290,7 @@ untruncated, with timestamps and per-prompt stats">JSON</a>` : ''}
 
   hydrateTips($('#view'));
   wireTable($('#view'));
+  wireFolds($('#view'));
   const toolsHost = $('#toolsBody');
   if (toolsHost) wireToolRows(toolsHost, s.id);
   const tl = s.timeline;
@@ -1490,243 +1325,10 @@ untruncated, with timestamps and per-prompt stats">JSON</a>` : ''}
   }
 };
 
-/** One slim card for the agents pages: cost histogram and the by-type
-    split side by side instead of two half-empty full-height cards. */
-function agentStatsHTML(d, project) {
-  return `<section class="blk"><div class="card agstats">
-    <div class="as-col">
-      <div class="as-t">Cost per run<span class="meta">log-spaced bins</span></div>
-      <div id="dist"></div>
-    </div>
-    <div class="as-col">
-      <div class="as-t">By type</div>
-      ${barList(d.by_type.map((b, i) => ({
-        label: b.key, value: b.cost, color: SERIES[i % SERIES.length],
-        text: usd(b.cost), sub: `${b.agents}`,
-        href: `#/agents?${project
-          ? `project=${encodeURIComponent(project)}&` : ''}type=${
-          encodeURIComponent(b.key)}`,
-        tip: `${b.agents} runs · ${tok(b.tokens)} tokens\n${
-          b.api_calls.toLocaleString()} calls`,
-      })))}
-    </div>
-  </div></section>`;
-}
-
-function agentStatsChart(d) {
-  colChart($('#dist'), d.distribution.map(b => ({
-    v: b.count, label: usd(b.lo),
-    tip: `${usd(b.lo)} – ${usd(b.hi)}\n${b.count} agents`,
-  })), { height: 96, fmt: v => Math.round(v) });
-}
-
-/** Top level of the Agents section: one card per project. Clicking drills
-    into that project's sessions → workflows → agents. */
-async function agentsProjectsView(params) {
-  const d = await api('/api/agents', { limit: 1500 });
-  const projs = new Map();
-  for (const a of d.agents) {
-    const key = a.project || '(unknown)';
-    if (!projs.has(key)) {
-      projs.set(key, { name: key, agents: 0, running: 0, cost: 0,
-                       sessions: new Set(), latest: 0 });
-    }
-    const p = projs.get(key);
-    p.agents++;
-    p.cost += a.cost;
-    if (a.state === 'running') p.running++;
-    p.sessions.add(a.session_id);
-    p.latest = Math.max(p.latest, a.started ? Date.parse(a.started) : 0);
-  }
-  const rows = [...projs.values()];
-  rows.sort((a, b) => (b.running - a.running) || (b.cost - a.cost));
-
-  $('#view').innerHTML = `
-    <div class="hd">
-      <div><h1>Agents</h1><p class="sub">${d.total} subagent runs across ${
-        rows.length} project${rows.length === 1 ? '' : 's'} in the last ${
-        winLabel()} · pick a project to explore</p></div>
-      <div class="right">
-        <input type="search" id="q" placeholder="Search agent topics…"
-               aria-label="Search agents" value="">
-        ${windowPicker()}
-      </div>
-    </div>
-
-    ${agentStatsHTML(d, '')}
-
-    <div class="gitgrid">${rows.map(p => `
-      <a class="card projcard" href="#/agents?project=${encodeURIComponent(p.name)}">
-        <div class="pc-head">${avatar(p.name)}<b>${esc(p.name)}</b>
-          ${p.running ? `<span class="st live"><i></i>${p.running} running</span>` : ''}
-        </div>
-        <div class="pc-stats">
-          <span><b class="num">${p.agents}</b> agent${p.agents === 1 ? '' : 's'}</span>
-          <span><b class="num">${p.sessions.size}</b> session${
-            p.sessions.size === 1 ? '' : 's'}</span>
-          <span class="num cost">${usd(p.cost)}</span>
-        </div>
-        <div class="pc-foot">last agent ${p.latest
-          ? ago(new Date(p.latest).toISOString()) : '—'} · explore →</div>
-      </a>`).join('') ||
-      '<div class="empty"><b>No agent runs in this window</b>Widen the time window to see older work.</div>'}
-    </div>`;
-
-  hydrateTips($('#view'));
-  wireWindow($('#view'));
-  agentStatsChart(d);
-  const qi = $('#q');
-  qi.addEventListener('input', debounce(() => {
-    if (!qi.value) return;
-    history.replaceState(null, '',
-      `#/agents?q=${encodeURIComponent(qi.value)}`);
-    route();
-  }, 260));
-}
-
-views.agents = async (params) => {
-  const q = params.get('q') || '', type = params.get('type') || '';
-  const project = params.get('project') || '';
-  const sort = params.get('sort') || 'cost';
-  // Two levels: a project grid at #/agents, and a drill-down (sessions →
-  // workflows → agents) once a project is picked — or immediately when
-  // searching or filtering by type, since those cut across projects.
-  if (!project && !q && !type) return agentsProjectsView(params);
-
-  const [d, sess] = await Promise.all([
-    api('/api/agents', { q, type, sort, project, limit: 1500 }),
-    api('/api/sessions', { project, limit: 2000 }),
-  ]);
-  const smeta = {};
-  for (const s of sess.sessions) smeta[s.id] = s;
-
-  // Hierarchy: session → workflow fan-outs → agents (spawn depth indents).
-  // Group in server order, so the running-first pinning and the chosen sort
-  // survive inside each group.
-  const bySession = new Map();
-  for (const a of d.agents) {
-    if (!bySession.has(a.session_id)) bySession.set(a.session_id, []);
-    bySession.get(a.session_id).push(a);
-  }
-  const groups = [...bySession.entries()].map(([sid, list]) => ({
-    sid, list,
-    running: list.filter(a => a.state === 'running').length,
-    cost: list.reduce((x, a) => x + a.cost, 0),
-    latest: list.reduce((x, a) =>
-      Math.max(x, a.started ? Date.parse(a.started) : 0), 0),
-  }));
-  groups.sort((a, b) => (b.running - a.running) || (b.latest - a.latest));
-
-  const agentRow = a => `
-    <a class="agrow" href="#/agent/${esc(a.session_id)}/${esc(a.id)}">
-      <span>${agentPill(a.state)}</span>
-      <span class="t${a.spawn_depth > 1 ? ' deep' : ''}" title="${esc(a.topic)}">${
-        a.spawn_depth > 1 ? '<i class="depthmark">└</i>' : ''}${esc(a.topic)}</span>
-      <span class="mut">${esc(a.type)}</span>
-      <span><span class="mchip">${esc(a.model_label)}</span></span>
-      <span class="num">${tok(a.tokens)}</span>
-      <span class="dur">${dur(a.duration_s)}</span>
-      <span class="num cost">${usd(a.cost)}</span>
-      <span class="dur">${ago(a.started)}</span>
-    </a>`;
-
-  const sessionBlock = (g, idx) => {
-    const m = smeta[g.sid] || {};
-    // Sub-group workflow fan-outs, keeping first-appearance order.
-    const wfs = new Map();
-    const direct = [];
-    for (const a of g.list) {
-      if (a.workflow_id) {
-        if (!wfs.has(a.workflow_id)) wfs.set(a.workflow_id, []);
-        wfs.get(a.workflow_id).push(a);
-      } else direct.push(a);
-    }
-    const wfHtml = [...wfs.entries()].map(([wid, arr]) => `
-      <div class="wfgrp">
-        <div class="wfhead">
-          <span class="refchip">⑃ ${esc(wid.replace('wf_', ''))}</span>
-          <span class="mut">workflow fan-out · ${arr.length} agent${
-            arr.length === 1 ? '' : 's'} · ${usd(arr.reduce((x, a) => x + a.cost, 0))}</span>
-          <a href="#/workflows">workflows →</a>
-        </div>
-        ${arr.map(agentRow).join('')}
-      </div>`).join('');
-    const open = g.running > 0 || idx < 3;
-    return `
-    <details class="agsess"${open ? ' open' : ''}>
-      <summary>
-        <i class="caret" aria-hidden="true"></i>
-        ${avatar(m.project || '?')}
-        <span class="s1"><b>${esc(m.project || g.sid.slice(0, 8))}</b>
-          <span class="tp">${esc(m.title || '')}</span></span>
-        ${g.running ? `<span class="st live"><i></i>${g.running} running</span>`
-          : (m.live ? '<span class="st idle"><i></i>live session</span>' : '')}
-        <span class="num mut">${g.list.length} agent${
-          g.list.length === 1 ? '' : 's'}</span>
-        <span class="num cost">${usd(g.cost)}</span>
-        <a class="btn" href="#/session/${esc(g.sid)}">session →</a>
-      </summary>
-      <div class="agbody">${wfHtml}${direct.map(agentRow).join('')}</div>
-    </details>`;
-  };
-
-  $('#view').innerHTML = `
-    ${project ? projectCrumb(project, 'Agents') + projectSecnav(project, 'agents') : ''}
-    <div class="hd">
-      <div><h1>Agents${project ? ` — ${esc(project)}` : ''}</h1>
-        <p class="sub">${d.total} subagent runs across ${
-        groups.length} session${groups.length === 1 ? '' : 's'} in the last ${
-        winLabel()}</p></div>
-      <div class="right">
-        ${project || type || q
-          ? `<a class="btn" href="#/agents">All projects ✕</a>` : ''}
-        <input type="search" id="q" placeholder="Search agent topics…"
-               aria-label="Search agents" value="${esc(q)}">
-        <div class="pills" id="sortSeg" role="group" aria-label="Sort agents">
-          ${['cost', 'recent', 'tokens', 'duration'].map(k =>
-            `<button data-k="${k}" class="${k === sort ? 'on' : ''}">${k}</button>`).join('')}
-        </div>
-        ${windowPicker()}
-      </div>
-    </div>
-
-    ${agentStatsHTML(d, project)}
-
-    <section class="blk">
-      <div class="aghead"><span></span><span>Topic</span><span>Type</span>
-        <span>Model</span><span class="r">Tokens</span><span class="r">Time</span>
-        <span class="r">Cost</span><span class="r">Started</span></div>
-      ${groups.map(sessionBlock).join('') ||
-        '<div class="empty"><b>No agents match</b>Try a different search or window.</div>'}
-    </section>`;
-
-  hydrateTips($('#view'));
-  wireWindow($('#view'));
-  agentStatsChart(d);
-  // Links inside <summary> must not toggle the group.
-  $$('.agsess summary a').forEach(a =>
-    a.addEventListener('click', e => e.stopPropagation()));
-  $$('#sortSeg button').forEach(b => b.addEventListener('click', () => {
-    const p = new URLSearchParams(location.hash.split('?')[1] || '');
-    p.set('sort', b.dataset.k);
-    history.replaceState(null, '', '#/agents?' + p);
-    route(true);
-  }));
-  const qi = $('#q');
-  qi.addEventListener('input', debounce(() => {
-    const p = new URLSearchParams(location.hash.split('?')[1] || '');
-    qi.value ? p.set('q', qi.value) : p.delete('q');
-    history.replaceState(null, '', '#/agents?' + p);
-    route();
-  }, 260));
-  if (q) { qi.focus(); qi.setSelectionRange(q.length, q.length); }
-};
-
 views.agent = async (params, sid, aid) => {
   const a = await api(`/api/agents/${sid}/${aid}`);
   $('#view').innerHTML = `
-    ${projectCrumb(a.project,
-      `<a href="#/agents?project=${encodeURIComponent(a.project)}">Agents</a>`,
+    ${crumb(sessionsLink(),
       `<a href="#/session/${esc(sid)}">${esc(a.session_title || sid.slice(0, 8))}</a>`,
       esc(a.id.slice(0, 10)))}
     <div class="hd">
@@ -1836,7 +1438,6 @@ views.workflows = async (params) => {
   }).join('');
 
   $('#view').innerHTML = `
-    ${project ? projectCrumb(project, 'Workflows') + projectSecnav(project, 'workflows') : ''}
     <div class="hd"><div><h1>Workflows${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">${wfs.length} fan-out runs · each bar is one agent, positioned
         by when it ran</p></div>
@@ -2031,8 +1632,8 @@ views.workflow = async (params, sid, wfid) => {
     : `<span class="st done"><i></i>${c.done}/${c.total} done</span>`;
 
   $('#view').innerHTML = `
-    ${projectCrumb(d.project,
-      `<a href="#/workflows?project=${encodeURIComponent(d.project)}">Workflows</a>`,
+    ${crumb(sessionsLink(),
+      `<a href="#/session/${esc(d.session_id)}">${esc(d.session_id.slice(0, 8))}</a>`,
       esc(d.short))}
     <div class="hd">
       <div><h1>${esc(d.name || d.topic || d.short)} ${statusPill}</h1>
@@ -2553,7 +2154,7 @@ async function gitRepoView(params, rid) {
   }).join('');
 
   $('#view').innerHTML = `
-    ${projectCrumb(d.project, 'Git', esc(d.name))}
+    ${crumb(`<a href="#/git">Git</a>`, esc(d.name))}
     <div class="hd">
       <div><h1>${avatar(d.name)} ${esc(d.name)}
         ${d.live ? `<span class="st live" style="margin-left:8px"><i></i>${
@@ -2702,7 +2303,6 @@ views.cost = async (params) => {
     ['Input, uncached', 'input', SERIES[4]],
   ];
   $('#view').innerHTML = `
-    ${project ? projectCrumb(project, 'Cost') + projectSecnav(project, 'cost') : ''}
     <div class="hd"><div><h1>Cost${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">Last ${winLabel()} · all figures are API list-price equivalents,
         not amounts billed.</p></div>
@@ -2803,7 +2403,6 @@ views.tools = async (params) => {
   const total = d.tools.reduce((a, b) => a + b.total, 0) || 1;
   const max = Math.max(...d.tools.map(x => x.total), 1);
   $('#view').innerHTML = `
-    ${project ? projectCrumb(project, 'Tools') + projectSecnav(project, 'tools') : ''}
     <div class="hd"><div><h1>Tools${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">${total.toLocaleString()} tool calls in the last ${winLabel()}
         · main thread vs subagents · click a tool to see what it ran</p></div>
@@ -2851,27 +2450,12 @@ async function route(silent) {
   const seg = path.split('/').filter(Boolean);
   const name = seg[0] || 'overview';
 
-  // Which sidebar entry owns this screen.
-  //
-  // Detail pages light the list they came from: one session belongs under
-  // Sessions, one agent run under Agents. Workflows has no menu entry, so it
-  // and its detail pages fall to Projects, and so does a project's own page.
-  const PARENT = { session: 'sessions',
-                   agent: 'agents',
-                   workflow: 'projects', workflows: 'projects',
-                   project: 'projects' };
-
-  // Cost and Tools are different: each exists twice. There is a global Cost
-  // and a global Tools in the sidebar, and there is a per-project Cost and
-  // Tools reached from the project's sub-nav. Both are the same view name, so
-  // a name-keyed map cannot tell them apart, and the project-scoped one used
-  // to light its own global entry — the sidebar said Tools while the crumb
-  // said Projects / <name> / Tools.
-  //
-  // The scope is the `project` param, and it is exactly what makes a view
-  // draw a project crumb. So: a screen showing a crumb belongs to Projects.
-  const inProject = (params.get('project') || '') !== '';
-  const section = PARENT[name] || (inProject ? 'projects' : name);
+  // Which sidebar entry owns this screen. Sessions are the primary
+  // hierarchy: detail pages (one session, one agent run, one workflow) all
+  // light Sessions, since that is the list they hang off.
+  const PARENT = { session: 'sessions', agent: 'sessions',
+                   workflow: 'sessions', workflows: 'sessions' };
+  const section = PARENT[name] || name;
 
   $$('.nav a').forEach(a => {
     const on = a.getAttribute('href') === '#/' + section;
@@ -2880,7 +2464,8 @@ async function route(silent) {
     else a.removeAttribute('aria-current');
   });
 
-  const scopeName = inProject ? ` — ${params.get('project')}` : '';
+  const proj = params.get('project') || '';
+  const scopeName = proj ? ` — ${proj}` : '';
   document.title = `${(PAGE[name] || {}).title || 'Dashboard'}${scopeName} · Claude Code Monitor`;
 
   const fn = views[name];
@@ -3055,8 +2640,8 @@ fetchPlan();
 setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
-const LIVE_PAGES = new Set(['overview', 'projects', 'project', 'sessions',
-  'session', 'agents', 'workflows', 'workflow', 'git']);
+const LIVE_PAGES = new Set(['overview', 'sessions', 'session',
+  'workflows', 'workflow', 'git']);
 setInterval(() => {
   const page = (location.hash.slice(1) || '/overview')
     .split('?')[0].split('/').filter(Boolean)[0] || 'overview';
