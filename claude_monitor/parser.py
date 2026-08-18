@@ -297,7 +297,7 @@ def _read_agent_meta(path: Path) -> dict:
     # sidecar and silently pick up its type and description.
     meta_path = path.parent / (path.stem + ".meta.json")
     try:
-        with open(meta_path) as fh:
+        with open(meta_path, encoding="utf-8") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
@@ -840,7 +840,7 @@ class Corpus:
 
     def _load_cache(self) -> None:
         try:
-            with open(self.cache_path) as fh:
+            with open(self.cache_path, encoding="utf-8") as fh:
                 blob = json.load(fh)
             if blob.get("version") == CACHE_VERSION:
                 self._cache = blob.get("entries", {})
@@ -880,7 +880,7 @@ class Corpus:
                     pass
                 fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
                              _CACHE_FILE_MODE)
-                with os.fdopen(fd, "w") as fh:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump({"version": CACHE_VERSION, "entries": snapshot}, fh)
                 os.replace(tmp, self.cache_path)
                 self._last_save = now
