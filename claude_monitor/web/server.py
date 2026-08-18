@@ -50,7 +50,7 @@ def _fetch_live_usage() -> Optional[dict]:
         return None
     result = None
     try:
-        creds = json.loads(CREDENTIALS.read_text())["claudeAiOauth"]
+        creds = json.loads(CREDENTIALS.read_text(encoding="utf-8"))["claudeAiOauth"]
         if creds.get("expiresAt", 0) / 1000 > now + 30:
             req = urllib.request.Request(
                 "https://api.anthropic.com/api/oauth/usage",
@@ -127,7 +127,7 @@ def plan_payload(*, allow_network: bool = True) -> dict:
     stale it is. Transcript data is never sent anywhere.
     """
     try:
-        state = json.loads(CLAUDE_STATE.read_text())
+        state = json.loads(CLAUDE_STATE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         state = {}
 
@@ -504,7 +504,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
     @app.route("/")
     def index():
         version = _asset_version()
-        html = (HERE / "templates" / "index.html").read_text()
+        html = (HERE / "templates" / "index.html").read_text(encoding="utf-8")
         resp = app.make_response(html.replace("__V__", str(version)))
         resp.mimetype = "text/html"
         resp.headers["Cache-Control"] = "no-store"
@@ -986,7 +986,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
                 for f in sdir.glob(f"*-{wfid}.js"):
                     script_name = f.stem[: f.stem.rfind("-wf_")]
                     try:
-                        script_text = f.read_text(errors="replace")[:120000]
+                        script_text = f.read_text(encoding="utf-8", errors="replace")[:120000]
                     except OSError:
                         pass
                     break
