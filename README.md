@@ -189,7 +189,45 @@ claude_monitor/
   dashboard.py   live rich TUI
   report.py      standalone HTML report
   cli.py         argparse entry point
+tests/
+  conftest.py    fixtures + a builder DSL for synthetic transcripts
 ```
+
+</details>
+
+<details>
+<summary><b>Tests</b></summary>
+
+<br>
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite is hermetic and fast (~1s): no test reads or writes your real
+`~/.claude`, and every transcript it parses is built on the fly by the helpers
+in `tests/conftest.py`.
+
+```
+tests/
+  conftest.py        transcript builder DSL, isolated $HOME, corpus fixtures
+  test_pricing.py    rate lookup, cache multipliers, the savings counterfactual
+  test_models.py     usage arithmetic, topic distillation, session rollups
+  test_activity.py   the live "what is it doing right now" state machine
+  test_parser.py     dedup, per-model attribution, subagents, workflows, tail
+  test_corpus.py     what gets re-parsed and what gets reused
+  test_analytics.py  daily attribution, fan-out shape, derived rates
+  test_gitmon.py     numstat parsing, line counting, subprocess guards
+  test_web.py        origin guards, filtering, the JSON API
+  test_encoding.py   text I/O under a non-UTF-8 platform default
+```
+
+`test_encoding.py` runs the real code paths in a child interpreter under a
+C/ASCII locale — the same failure mode as a Windows ANSI code page — and
+carries a static AST guard that fails on any text `open`, `read_text`,
+`write_text` or `subprocess.run(text=True)` added without an explicit
+`encoding`.
 
 </details>
 
