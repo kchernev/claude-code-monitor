@@ -1121,10 +1121,64 @@ views.overview = async () => {
 const crumb = (...parts) => `<div class="crumb">${parts.join(' / ')}</div>`;
 const sessionsLink = () => `<a href="#/sessions">Sessions</a>`;
 
+// ── session-window attribution ────────────────────────────────────────────
+// The plan-limit breakdown, condensed onto one line under the Sessions
+// heading: project and model shares fold behind pills, and each pill reads
+// as a summary even when folded. (limitColor/resetInfo live further down;
+// they are only read at render time.)
+function sessionWindowCard(plan) {
+  if (!plan || !plan.session_window) return '';
+  const sw = plan.session_window;
+  const lim = (plan.limits || []).find(l => l.key === 'session');
+  const top = sw.projects[0];
+  const r = lim ? resetInfo(lim) : null;
+
+  const limBox = lim
+    ? `<span class="swbox" title="${esc(lim.label)} — ${lim.percent}% used${
+        r ? `, resets in ${r.rel}${r.abs ? ` (${r.abs})` : ''}` : ''}">
+         <span class="swlab">${esc(lim.label)}</span>
+         <span class="swtrack"><i style="width:${Math.min(100, lim.percent)}%;
+           background:${limitColor(lim)}"></i></span>
+         <b>${lim.percent}%</b></span>`
+    : '';
+  const pill = (title, items, color, href) => {
+    if (!items || !items.length) return '';
+    const lead = items.slice(0, 2)
+      .map(i => `${esc(i.label)} ${(i.share * 100).toFixed(0)}%`)
+      .join(' · ');
+    const rowsBar = barList(items.slice(0, 6).map(i => ({
+      label: i.label, value: i.share, color,
+      text: usd(i.cost), sub: (i.share * 100).toFixed(0) + '%',
+      href: href ? href(i) : undefined,
+      tip: `${tok(i.tokens)} tokens`,
+    })));
+    // data-fold + wireFolds keeps it open across the 12s silent refresh —
+    // same persistence the session page's fold sections use.
+    return `<details class="sww" data-fold="sw-${title}"${
+      foldIsOpen('sw-' + title) ? ' open' : ''}>
+      <summary>${title} · ${lead}</summary>
+      <div class="swbody">${rowsBar}</div>
+    </details>`;
+  };
+
+  return `<div class="swl">
+  <span class="mut">Session window · ${usd(sw.cost)} burned</span>
+  ${limBox}
+  <span class="mut">${top ? `top ${esc(top.label)}` : 'no spend'}</span>
+  ${pill('By project', sw.projects, 'var(--vio)',
+    i => '#/sessions?project=' + encodeURIComponent(i.name))}
+  ${pill('By model', sw.models, 'var(--gold)')}
+  <span class="swreset">${r ? `resets in ${r.rel}${r.abs ? ` · ${esc(r.abs)}` : ''}` : ''}</span>
+</div>`;
+}
+
 views.sessions = async (params) => {
   const q = params.get('q') || '', project = params.get('project') || '';
   const sort = params.get('sort') || 'recent';
-  const d = await api('/api/sessions', { q, project, sort });
+  const [d, plan] = await Promise.all([
+    api('/api/sessions', { q, project, sort }),
+    planReq,
+  ]);
 
   const rows = d.sessions.map(s => {
     const st = sessStatus(s);
@@ -1158,6 +1212,7 @@ views.sessions = async (params) => {
         ${windowPicker()}
       </div>
     </div>
+    ${sessionWindowCard(plan)}
     ${table([
       { h: 'ID', key: 'id' },
       { h: 'Project', key: 'sess', grow: 1, link: 1, sort: 'recent' },
@@ -1179,6 +1234,7 @@ views.sessions = async (params) => {
 
   wireTable($('#view'), k => setParam('sort', k));
   wireWindow($('#view'));
+  wireFolds($('#view'));
   const qi = $('#q');
   qi.addEventListener('input', debounce(() => {
     const p2 = new URLSearchParams(location.hash.split('?')[1] || '');
@@ -2630,6 +2686,16 @@ async function poll() {
 }
 
 // ── plan & limits → sidebar ───────────────────────────────────────────
+// planReq shares the first request with any view that wants the payload
+// (Sessions renders the session-window breakdown from it), so a page
+// navigation never fires a second fetch.
+function planFetch() { return fetch('/api/plan').then(r => r.json()); }
+function planPaint(p) {
+  state.plan = p;
+  if (p) paintPlan(p);
+  return p;
+}
+let planReq = planFetch().then(planPaint).catch(() => null);
 function paintPlan(p) {
   const box = $('#planBox');
   if (!p || p.available === false) { box.hidden = true; return; }
@@ -2655,8 +2721,8 @@ function paintPlan(p) {
 }
 async function fetchPlan() {
   try {
-    state.plan = await (await fetch('/api/plan')).json();
-    paintPlan(state.plan);
+    planReq = planFetch().then(planPaint).catch(() => null);
+    await planReq;
   } catch (e) { /* server restarting; keep last */ }
 }
 
@@ -2701,7 +2767,6 @@ setInterval(() => {
     if (t0) el.textContent = dur(Math.max(1, Date.now() / 1000 - t0));
   });
 }, 1000);
-fetchPlan();
 setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.

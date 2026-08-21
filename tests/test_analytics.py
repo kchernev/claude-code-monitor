@@ -391,6 +391,97 @@ def test_recent_rates_on_an_idle_corpus_are_zero():
     assert analytics.recent_rates([make_session()]) == (0.0, 0.0)
 
 
+# ---------------------------------------------------------------------------
+# Usage inside an absolute window (plan-limit attribution)
+# ---------------------------------------------------------------------------
+
+
+def test_window_usage_counts_only_calls_inside_the_window():
+    now = datetime.now(UTC)
+    lo, hi = now - timedelta(hours=5), now + timedelta(hours=1)
+    s = make_session(project="proj", per_model={
+        "claude-opus-5": stat(Usage(), cost=4.0, calls=2),
+    })
+    s.timeline = [
+        ((now - timedelta(hours=6)).timestamp(), 100, 1000, 1.0, 1.0),
+        ((now - timedelta(hours=1)).timestamp(), 200, 2000, 3.0, 3.0),
+    ]
+    w = analytics.window_usage([s], lo.timestamp(), hi.timestamp())
+
+    assert w["cost"] == pytest.approx(3.0)
+    assert w["tokens"] == 2200
+    assert len(w["projects"]) == 1
+    p = w["projects"][0]
+    assert p["name"] == "proj"
+    assert p["cost"] == pytest.approx(3.0)
+    assert p["tokens"] == 2200
+    assert p["share"] == pytest.approx(1.0)
+    m = w["models"][0]
+    assert m["name"] == "claude-opus-5"
+    assert m["label"] == "Opus 5"
+    assert m["cost"] == pytest.approx(3.0)
+
+
+def test_window_usage_apportions_agents_by_their_overlap():
+    now = datetime.now(UTC)
+    lo, hi = now - timedelta(hours=1), now + timedelta(hours=1)
+    s = make_session(project="proj")
+    # Half of a two-hour agent falls inside the one-hour window.
+    s.agents = [
+        agent("a1", started=now - timedelta(hours=2), ended=now,
+              cost=4.0, usage=Usage(output_tokens=1000),
+              per_model={"claude-opus-5": stat(Usage(), cost=4.0)}),
+        # An agent that finished before the window contributes nothing.
+        agent("a2", started=now - timedelta(hours=3),
+              ended=now - timedelta(hours=2), cost=10.0,
+              usage=Usage(output_tokens=10_000),
+              per_model={"claude-opus-5": stat(Usage(), cost=10.0)}),
+    ]
+    w = analytics.window_usage([s], lo.timestamp(), hi.timestamp())
+
+    assert w["cost"] == pytest.approx(2.0)
+    assert w["projects"][0]["cost"] == pytest.approx(2.0)
+    assert w["projects"][0]["tokens"] == 500
+    assert w["models"][0]["cost"] == pytest.approx(2.0)
+
+
+def test_window_usage_counts_a_running_agent_as_ending_now():
+    now = datetime.now(UTC)
+    lo, hi = now - timedelta(hours=5), now + timedelta(hours=4)
+    s = make_session(project="proj")
+    s.agents = [agent("a1", started=now - timedelta(minutes=10), ended=None,
+                      cost=2.0, usage=Usage(output_tokens=100),
+                      per_model={"claude-opus-5": stat(Usage(), cost=2.0)})]
+    w = analytics.window_usage([s], lo.timestamp(), hi.timestamp())
+    assert w["cost"] == pytest.approx(2.0)
+
+
+def test_window_usage_splits_multi_model_sessions_by_cost_share():
+    now = datetime.now(UTC)
+    lo, hi = now - timedelta(hours=5), now + timedelta(hours=1)
+    s = make_session(project="proj", per_model={
+        "claude-opus-5": stat(Usage(), cost=3.0, calls=1),
+        "claude-haiku-4-5": stat(Usage(), cost=1.0, calls=9),
+    })
+    s.timeline = [((now - timedelta(hours=1)).timestamp(), 100, 900, 2.0, 2.0)]
+    w = analytics.window_usage([s], lo.timestamp(), hi.timestamp())
+
+    models = {m["name"]: m for m in w["models"]}
+    assert models["claude-opus-5"]["cost"] == pytest.approx(1.5)
+    assert models["claude-haiku-4-5"]["cost"] == pytest.approx(0.5)
+    # Projects stay exact even when the model split is apportioned.
+    assert w["projects"][0]["cost"] == pytest.approx(2.0)
+
+
+def test_window_usage_on_an_empty_window_has_no_rows():
+    now = datetime.now(UTC)
+    w = analytics.window_usage(
+        [make_session()], (now - timedelta(hours=5)).timestamp(),
+        now.timestamp())
+    assert w["cost"] == 0.0 and w["tokens"] == 0
+    assert w["projects"] == [] and w["models"] == []
+
+
 def test_token_economics_parts_sum_to_the_whole():
     s = make_session(per_model={
         "claude-opus-5": stat(Usage(input_tokens=1000, output_tokens=2000,

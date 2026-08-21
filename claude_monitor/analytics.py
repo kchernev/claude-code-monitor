@@ -8,7 +8,7 @@ from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from . import pricing
-from .models import AgentRun, Session, Usage
+from .models import AgentRun, ModelStat, Session, Usage
 
 
 @dataclass
@@ -475,6 +475,95 @@ def recent_rates(
             cost += a.cost * frac
             out += a.usage.output_tokens * frac
     return cost / window_s * 3600.0, out / window_s
+
+
+def window_usage(
+    sessions: Iterable[Session], lo: float, hi: float
+) -> dict:
+    """Per-project and per-model usage inside an absolute epoch window.
+
+    Built for the plan-limit readout: a session limit spans a fixed window,
+    and this attributes what was burned inside it. Main-thread calls are
+    exact, since the timeline is per call; agent totals are apportioned by
+    how much of their runtime falls inside the window — the same convention
+    the recent-rates and daily buckets use, except an agent still running is
+    treated as ending now rather than never. Model splits come from the
+    per-model stats recorded at parse time: single-model sessions (the common
+    case) are exact; multi-model sessions are apportioned by cost share,
+    because the timeline carries no per-call model.
+    """
+    projects: Dict[str, List[float]] = {}
+    models: Dict[str, List[float]] = {}
+    now = datetime.now(timezone.utc).timestamp()
+
+    def bump(table: Dict[str, List[float]], key: str,
+             cost: float, tokens: float) -> None:
+        row = table.setdefault(key, [0.0, 0.0])
+        row[0] += cost
+        row[1] += tokens
+
+    def split_models(per_model: Dict[str, ModelStat],
+                     cost: float, tokens: float) -> None:
+        if not per_model:
+            return
+        if len(per_model) == 1:
+            bump(models, next(iter(per_model)), cost, tokens)
+            return
+        shares = {m: st.cost for m, st in per_model.items()}
+        total = sum(shares.values())
+        if total <= 0:
+            # Costless models (synthetic/test fixtures) split by tokens.
+            shares = {m: float(st.usage.total) for m, st in per_model.items()}
+            total = sum(shares.values())
+        if total <= 0:
+            return
+        for m, v in shares.items():
+            bump(models, m, cost * v / total, tokens * v / total)
+
+    for s in sessions:
+        main_cost = 0.0
+        main_tokens = 0.0
+        for ts, out, ctx, cost, _unc in s.timeline:
+            if lo <= ts <= hi:
+                main_cost += cost
+                main_tokens += ctx + out
+        if main_cost or main_tokens:
+            bump(projects, s.project, main_cost, main_tokens)
+            split_models(s.per_model, main_cost, main_tokens)
+        for a in s.agents:
+            if not a.started:
+                continue
+            t0 = a.started.timestamp()
+            t1 = a.ended.timestamp() if a.ended else now
+            overlap = min(hi, t1) - max(lo, t0)
+            if overlap <= 0:
+                continue
+            frac = overlap / max(1.0, t1 - t0)
+            cost = a.cost * frac
+            tokens = a.usage.total * frac
+            bump(projects, s.project, cost, tokens)
+            split_models(a.per_model, cost, tokens)
+
+    total_cost = sum(v[0] for v in projects.values())
+    total_tokens = sum(v[1] for v in projects.values())
+
+    def rows(table: Dict[str, List[float]], *, is_model: bool) -> List[dict]:
+        out = [{
+            "name": k,
+            "label": pricing.display_name(k) if is_model else k,
+            "cost": round(c, 6),
+            "tokens": int(round(t)),
+            "share": (c / total_cost) if total_cost > 0 else 0.0,
+        } for k, (c, t) in table.items() if c > 0 or t > 0]
+        out.sort(key=lambda r: r["cost"], reverse=True)
+        return out
+
+    return {
+        "cost": round(total_cost, 6),
+        "tokens": int(round(total_tokens)),
+        "projects": rows(projects, is_model=False),
+        "models": rows(models, is_model=True),
+    }
 
 
 def velocity_series(sess: Session, bucket_s: float = 30.0) -> List[Tuple[float, float]]:

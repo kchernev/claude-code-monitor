@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from claude_monitor.models import ModelStat, Session
 from claude_monitor.web import server as srv
 from claude_monitor.web.server import (
     _hostname_of, _limit_entry, _plan_label, host_is_trusted, plan_payload,
@@ -475,8 +476,80 @@ def test_offline_the_plan_card_falls_back_to_claude_codes_own_cache(tmp_path):
 
 
 def test_a_corrupt_claude_state_file_does_not_break_the_card(tmp_path,
-                                                             monkeypatch):
+                                                              monkeypatch):
     state = tmp_path / "claude.json"
     state.write_text("{not json", encoding="utf-8")
     monkeypatch.setattr(srv, "CLAUDE_STATE", state)
     assert plan_payload(allow_network=False) == {"available": False}
+
+
+# ---------------------------------------------------------------------------
+# Session-window attribution
+# ---------------------------------------------------------------------------
+
+
+def _cached_state(tmp_path, monkeypatch, limits):
+    now = datetime.now(timezone.utc)
+    state = tmp_path / "claude.json"
+    state.write_text(json.dumps({
+        "oauthAccount": {"organizationRateLimitTier": "claude_max_20x"},
+        "cachedUsageUtilization": {
+            "fetchedAtMs": now.timestamp() * 1000,
+            "utilization": {"limits": limits},
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(srv, "CLAUDE_STATE", state)
+    return now
+
+
+def test_the_session_window_is_attributed_to_projects_and_models(
+        tmp_path, monkeypatch):
+    now = _cached_state(tmp_path, monkeypatch, [{
+        "kind": "session", "percent": 40, "is_active": True,
+        "resets_at": (datetime.now(timezone.utc)
+                      + timedelta(hours=2)).isoformat(),
+    }])
+    s = Session(session_id="s1", path="/tmp/s1.jsonl",
+                project_dir="-home-dev-proj", cwd="/home/dev/proj",
+                per_model={"claude-opus-5": ModelStat(calls=1, cost=2.0)})
+    s.timeline = [
+        ((now - timedelta(hours=1)).timestamp(), 100, 900, 2.0, 2.0),
+        ((now - timedelta(hours=6)).timestamp(), 100, 900, 9.0, 9.0),
+    ]
+
+    payload = plan_payload(allow_network=False, sessions=[s])
+    w = payload["session_window"]
+
+    assert w["percent"] == 40
+    assert w["cost"] == pytest.approx(2.0)
+    assert w["projects"][0]["name"] == "proj"
+    assert w["projects"][0]["share"] == pytest.approx(1.0)
+    assert w["models"][0]["name"] == "claude-opus-5"
+
+
+def test_the_session_window_needs_a_reset_and_sessions(
+        tmp_path, monkeypatch):
+    _cached_state(tmp_path, monkeypatch, [
+        {"kind": "session", "percent": 0, "is_active": False},  # no resets_at
+        {"kind": "weekly_all", "percent": 10, "is_active": True,
+         "resets_at": (datetime.now(timezone.utc)
+                       + timedelta(days=3)).isoformat()},
+    ])
+    s = Session(session_id="s1", path="/tmp/s1.jsonl",
+                project_dir="-home-dev-proj", cwd="/home/dev/proj")
+
+    assert plan_payload(allow_network=False, sessions=[s])[
+        "session_window"] is None
+    assert plan_payload(allow_network=False)["session_window"] is None
+
+
+def test_a_reset_already_in_the_past_opens_no_window(tmp_path, monkeypatch):
+    _cached_state(tmp_path, monkeypatch, [{
+        "kind": "session", "percent": 100, "is_active": True,
+        "resets_at": (datetime.now(timezone.utc)
+                      - timedelta(hours=1)).isoformat(),
+    }])
+    s = Session(session_id="s1", path="/tmp/s1.jsonl",
+                project_dir="-home-dev-proj", cwd="/home/dev/proj")
+    assert plan_payload(allow_network=False, sessions=[s])[
+        "session_window"] is None

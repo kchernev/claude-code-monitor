@@ -38,6 +38,8 @@ CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
 # at most every FAIL_TTL and a good answer is reused for LIVE_TTL.
 LIVE_TTL = 60.0
 FAIL_TTL = 120.0
+# Claude Code session limits span a five-hour window ending at the reset time.
+SESSION_WINDOW_H = 5
 _live_cache: dict = {"at": 0.0, "data": None}
 
 
@@ -117,7 +119,36 @@ def _limit_entry(lim: dict, now: datetime) -> dict:
     }
 
 
-def plan_payload(*, allow_network: bool = True) -> dict:
+def _session_window_breakdown(limits: List[dict],
+                              sessions: Optional[List[Session]]
+                              ) -> Optional[dict]:
+    """Attribute the current session-limit window's usage to projects/models.
+
+    The session limit spans a fixed five-hour window ending at its reset
+    instant. ``None`` when there is no active session window — no limit data,
+    no reset time, or a reset already in the past.
+    """
+    if not sessions:
+        return None
+    lim = next((l for l in limits if l["key"] == "session"), None)
+    if not lim or not lim.get("resets_at"):
+        return None
+    try:
+        end = datetime.fromisoformat(lim["resets_at"])
+    except (TypeError, ValueError):
+        return None
+    if end <= datetime.now(timezone.utc):
+        return None
+    start = end - timedelta(hours=SESSION_WINDOW_H)
+    w = analytics.window_usage(sessions, start.timestamp(), end.timestamp())
+    w["start"] = start.isoformat()
+    w["end"] = end.isoformat()
+    w["percent"] = lim["percent"]
+    return w
+
+
+def plan_payload(*, allow_network: bool = True,
+                 sessions: Optional[List[Session]] = None) -> dict:
     """Subscription tier and limit utilization.
 
     Utilization comes live from Anthropic's OAuth usage endpoint (the same
@@ -125,6 +156,9 @@ def plan_payload(*, allow_network: bool = True) -> dict:
     fails — offline, token expired, ``allow_network`` off — it falls back to
     Claude Code's own cached copy in ~/.claude.json, with age_s saying how
     stale it is. Transcript data is never sent anywhere.
+
+    When ``sessions`` is passed, ``session_window`` attributes the usage
+    inside the current session-limit window to projects and models.
     """
     try:
         state = json.loads(CLAUDE_STATE.read_text(encoding="utf-8"))
@@ -170,6 +204,8 @@ def plan_payload(*, allow_network: bool = True) -> dict:
             "percent": extra.get("utilization") or 0,
             "reason": extra.get("disabled_reason") or "",
         }
+    payload["session_window"] = _session_window_breakdown(
+        payload["limits"], sessions)
     return payload
 
 
@@ -513,7 +549,9 @@ def create_app(claude_dir: Optional[Path] = None, *,
     # -- plan & limits ----------------------------------------------------
     @app.route("/api/plan")
     def api_plan():
-        return jsonify(plan_payload(allow_network=app.config["ALLOW_NETWORK"]))
+        return jsonify(plan_payload(
+            allow_network=app.config["ALLOW_NETWORK"],
+            sessions=store.sessions()))
 
     # -- global summary ---------------------------------------------------
     @app.route("/api/summary")
