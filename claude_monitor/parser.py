@@ -300,7 +300,10 @@ def _read_agent_meta(path: Path) -> dict:
         with open(meta_path, encoding="utf-8") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        # ValueError, not JSONDecodeError: a sidecar holding bytes that are not
+        # valid UTF-8 raises UnicodeDecodeError, which JSONDecodeError misses.
+        # Both are ValueError, and a bad sidecar must never fail a whole parse.
         return {}
 
 

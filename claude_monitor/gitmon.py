@@ -43,7 +43,8 @@ def run_git(repo: str, *args: str, timeout: float = 10) -> str:
     try:
         p = subprocess.run(
             ["git", "-C", repo, *args],
-            capture_output=True, text=True, timeout=timeout, errors="replace",
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
         )
         return p.stdout if p.returncode == 0 else ""
     except (subprocess.TimeoutExpired, OSError):
