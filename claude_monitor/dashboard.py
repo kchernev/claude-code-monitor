@@ -162,13 +162,20 @@ class Dashboard:
         mem_pct = sysinfo.get("mem_percent", 0.0)
         agent_ct = sum(len(s.agents) for s in live)
 
+        # Tokens lead, by kind; spend and burn share one cell at the end.
+        tk = analytics.recent_tokens(self.sessions, window_s)
         grid.add_row(
             cell("LIVE SESSIONS", f"{len(live)}", C_LIVE if live else C_DIM),
             cell("SUBAGENTS", f"{agent_ct}", C_AGENT),
+            cell(f"INPUT / {int(self.window_hours)}H",
+                 f"{pricing.fmt_tokens(tk['fresh'])} fresh · "
+                 f"{pricing.fmt_tokens(tk['resent'])} re-sent",
+                 C_TEAL),
+            cell("OUTPUT", f"{pricing.fmt_tokens(tk['output'])} · {live_tps:,.0f} tok/s",
+                 C_TEAL),
             cell(f"SPEND / {int(self.window_hours)}H",
-                 pricing.fmt_usd(window_cost), C_COST),
-            cell("BURN RATE", f"{pricing.fmt_usd(burn)}/hr", C_COST),
-            cell("OUTPUT", f"{live_tps:,.0f} tok/s", C_TEAL),
+                 f"{pricing.fmt_usd(window_cost)} · {pricing.fmt_usd(burn)}/hr",
+                 C_COST),
             cell("HOST", f"{cpu:.0f}% cpu · {mem_pct:.0f}% mem", C_PRIMARY),
         )
 

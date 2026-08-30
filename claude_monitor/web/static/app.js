@@ -60,6 +60,40 @@ const hueFor = name => {
   return HUES[h % HUES.length];
 };
 
+// ── token kinds ───────────────────────────────────────────────────────
+// The four buckets every token view draws, in fixed stacking/legend order
+// with a fixed palette slot each — a kind keeps its colour on every page and
+// in every mode, whichever kinds happen to be visible.
+//
+// This is not the API's own split. Claude Code caches the whole prompt, so
+// the API's input_tokens is a ~100-token stub and everything new lands in
+// "cache write" — together with context re-sent after the cache lapsed. The
+// parser separates those two by comparing each call's context size with the
+// previous call's, which is the split that actually explains a bill.
+const KINDS = [
+  { key: 'fresh', label: 'Fresh input', color: 'var(--s1)', hex: '#2a78d6',
+    note: 'read for the first time — your prompts, tool results, its own earlier replies; full price' },
+  { key: 'resent', label: 'Re-sent', color: 'var(--s2)', hex: '#eb6834',
+    note: 'context the model had already read, written into the cache again at full price — the cache lapsed during an idle gap, or an earlier part of the prompt changed' },
+  { key: 'cache_read', label: 'Cache read', color: 'var(--s3)', hex: '#1baf7a',
+    note: 're-read from the prompt cache at 0.1× the input rate — the same context, every call' },
+  { key: 'output', label: 'Output', color: 'var(--s4)', hex: '#eda100',
+    note: 'what the model generated — the new work' },
+];
+const rereadX = x => x >= 10 ? `×${Math.round(x)}` : `×${(+x || 0).toFixed(1)}`;
+const KIND = Object.fromEntries(KINDS.map(k => [k.key, k]));
+const kindsOf = split => KINDS.map(k => ({ ...k, v: +(split && split[k.key]) || 0 }));
+const splitTotal = split => KINDS.reduce((a, k) => a + (+(split && split[k.key]) || 0), 0);
+const splitInput = split => splitTotal(split) - (+(split && split.output) || 0);
+// One shared view mode for every stacked token chart: cache reads are
+// re-billed on every call and dwarf everything else, so "hide cache reads"
+// is what makes fresh input and output readable; "share" normalises to 100%.
+const TOKMODES = [['all', 'All tokens'], ['nocache', 'Hide cache reads'],
+                  ['share', 'Share']];
+const modeKinds = () => state.tokmode === 'nocache'
+  ? KINDS.filter(k => k.key !== 'cache_read') : KINDS;
+const modeShare = () => state.tokmode === 'share';
+
 // ── tooltip (hover + keyboard focus; Esc dismisses) ───────────────────
 const tipEl = $('#tip');
 function hideTip() { tipEl.classList.remove('on'); }
@@ -94,7 +128,9 @@ function hydrateTips(root) {
 }
 
 // ── state & api (short-TTL cache + per-navigation abort) ──────────────
-const state = { days: 30, summary: null, live: null, signal: null };
+const state = { days: 30, summary: null, live: null, signal: null,
+                tokmode: localStorage.getItem('cm.tokmode') || 'all',
+                flowModel: localStorage.getItem('cm.flowmodel') || '' };
 const apiCache = new Map();
 const API_TTL = 8000;
 function invalidateApi() { apiCache.clear(); }
@@ -284,6 +320,21 @@ function waveChart(host, rows, opts = {}) {
   });
 }
 
+/** Start / middle / end labels for a time axis. Inside a single day the
+    middle and end labels drop the date, so three labels fit a narrow card. */
+function timeAxis(s, X, x0, x1, y) {
+  const sameDay = x1 - x0 < 86400;
+  const full = ts => new Date(ts * 1000).toLocaleString(undefined,
+    { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const clock = ts => new Date(ts * 1000).toLocaleTimeString(undefined,
+    { hour: '2-digit', minute: '2-digit' });
+  [[x0, 'start', full], [(x0 + x1) / 2, 'middle', sameDay ? clock : full],
+   [x1, 'end', sameDay ? clock : full]].forEach(([tv, pos, f]) => {
+    const t = svg('text', { class: 'axis-t', x: X(tv), y, 'text-anchor': pos }, s);
+    t.textContent = f(tv);
+  });
+}
+
 /** Time-series area+line with crosshair (session detail). points: [{t,v}] */
 function lineChart(host, points, opts = {}) {
   const W = host.clientWidth || 700, H = opts.height || 170;
@@ -302,15 +353,7 @@ function lineChart(host, points, opts = {}) {
     const t = svg('text', { class: 'axis-t', x: 4, y: y + 3 }, s);
     t.textContent = opts.fmt ? opts.fmt(v) : tok(v);
   }
-  if (x1 > x0) {
-    const fmtT = ts => new Date(ts * 1000).toLocaleString(undefined,
-      { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    [[x0, 'start'], [(x0 + x1) / 2, 'middle'], [x1, 'end']].forEach(([tv, pos]) => {
-      const t = svg('text', { class: 'axis-t', x: X(tv), y: H - 5,
-        'text-anchor': pos }, s);
-      t.textContent = fmtT(tv);
-    });
-  }
+  if (x1 > x0) timeAxis(s, X, x0, x1, H - 5);
   const color = opts.color || 'var(--vio)';
   const d = points.map((p, i) =>
     `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join('');
@@ -432,15 +475,25 @@ function barList(items) {
 const foldIsOpen = key => localStorage.getItem('cm.fold.' + key) === '1';
 function foldSection(key, title, meta, body) {
   return `<details class="fold" data-fold="${esc(key)}"${
-    foldIsOpen(key) ? ' open' : ''}>
+    foldIsOpen(key) ? ' open' : ' data-stale="1"'}>
     <summary><span class="caret"></span>${esc(title)}
       <span class="meta">${meta}</span></summary>
     <div class="foldbody">${body}</div></details>`;
 }
 function wireFolds(root) {
   $$('details[data-fold]', root || document).forEach(el =>
-    el.addEventListener('toggle', () =>
-      localStorage.setItem('cm.fold.' + el.dataset.fold, el.open ? '1' : '0')));
+    el.addEventListener('toggle', () => {
+      localStorage.setItem('cm.fold.' + el.dataset.fold, el.open ? '1' : '0');
+      // A chart drawn inside a closed fold measured a 0px host and fell back
+      // to a default width; redraw once it can actually be seen. The stale
+      // flag is set only at render time for closed folds, so this never
+      // loops on the toggle a freshly-rendered open fold may fire.
+      if (el.open && el.dataset.stale && el.querySelector('svg.chart')) {
+        delete el.dataset.stale;
+        const y = scrollY;
+        route(true).then(() => scrollTo(0, y));
+      }
+    }));
 }
 
 /* Modal + tools drill-down: what a tool actually executed, in a popup. */
@@ -509,6 +562,195 @@ function legend(pairs) {
   return '<div class="legend">' + pairs.map(([n, c]) =>
     `<span class="lg"><span class="sw" style="background:${c}"></span>${esc(n)}</span>`
   ).join('') + '</div>';
+}
+
+// ── token composition ─────────────────────────────────────────────────
+/** Inline composition bar: one segment per kind, 2px surface gaps. Every
+    non-zero kind gets at least 2px so a 0.3% sliver of fresh input is still
+    visible — the tooltip carries the exact numbers. */
+function tokBar(split, opts = {}) {
+  const ks = kindsOf(split).filter(k => k.v > 0);
+  const total = ks.reduce((a, k) => a + k.v, 0);
+  if (!total) return '';
+  const tip = ks.map(k => `${k.label.padEnd(12)}${tok(k.v).padStart(8)}  ${
+    (100 * k.v / total).toFixed(1).padStart(5)}%`).join('\n');
+  return `<span class="tokbar${opts.cls ? ' ' + opts.cls : ''}" data-tip="${esc(tip)}">${
+    ks.map(k => `<i style="flex:${k.v} 1 0%;background:${k.color}"></i>`).join('')
+  }</span>`;
+}
+function tokModePicker() {
+  return `<div class="tmode" role="group" aria-label="Token view">${
+    TOKMODES.map(([k, l]) => `<button type="button" data-tm="${k}" class="${
+      k === state.tokmode ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+}
+function wireTokMode(root) {
+  $$('.tmode button[data-tm]', root || document).forEach(b =>
+    b.addEventListener('click', () => {
+      state.tokmode = b.dataset.tm;
+      localStorage.setItem('cm.tokmode', state.tokmode);
+      $$('.tmode button[data-tm]').forEach(x =>
+        x.classList.toggle('on', x.dataset.tm === state.tokmode));
+      const y = scrollY;
+      route(true).then(() => scrollTo(0, y));
+    }));
+}
+
+/** Column outline with a 4px rounded cap and a square base. */
+function capRect(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, h / 2, w / 2));
+  if (r < 0.5) return `M${x} ${y}h${w}v${h}h${-w}z`;
+  return `M${x} ${y + r}a${r} ${r} 0 0 1 ${r} ${-r}h${w - 2 * r}a${r} ${r} 0 0 1 ${r} ${r}v${
+    h - r}h${-w}z`;
+}
+
+/** Stacked columns by kind. rows: [{label, tip, split}]; opts.kinds picks
+    the visible kinds (fixed order kept), opts.share normalises to 100%. */
+function stackChart(host, rows, opts = {}) {
+  const W = host.clientWidth || 700, H = opts.height || 190;
+  const pad = { t: 10, r: 6, b: 22, l: 46 };
+  const kinds = opts.kinds || KINDS, share = !!opts.share, GAP = 2;
+  host.innerHTML = '';
+  if (!rows.length) { host.innerHTML = '<div class="empty">No data</div>'; return; }
+  const tot = r => kinds.reduce((a, k) => a + (+r.split[k.key] || 0), 0);
+  const totals = rows.map(tot);
+  const sc = share ? { max: 1, ticks: [0, .25, .5, .75, 1] } : niceScale(Math.max(...totals));
+  const plotH = H - pad.t - pad.b;
+  const Y = v => H - pad.b - (v / sc.max) * plotH;
+  const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H }, host);
+  for (const v of sc.ticks) {
+    const y = Y(v);
+    svg('line', { class: 'grid-line', x1: pad.l, x2: W - pad.r, y1: y, y2: y }, s);
+    const t = svg('text', { class: 'axis-t', x: 4, y: y + 3 }, s);
+    t.textContent = share ? Math.round(v * 100) + '%' : (opts.fmt || tok)(v);
+  }
+  const iw = (W - pad.l - pad.r) / rows.length;
+  const bw = Math.min(24, Math.max(2, iw - GAP));
+  rows.forEach((r, i) => {
+    const total = totals[i];
+    const x = pad.l + i * iw + (iw - bw) / 2;
+    const g = svg('g', { class: 'stk' }, s);
+    if (total > 0) {
+      const scale = share ? 1 / total : 1;
+      const segs = kinds.map(k => ({ k, v: (+r.split[k.key] || 0) * scale }))
+        .filter(sg => sg.v > 0);
+      let acc = 0;
+      segs.forEach((sg, j) => {
+        const y0 = Y(acc), y1 = Y(acc + sg.v);
+        acc += sg.v;
+        const top = j === segs.length - 1;
+        // The surface gap comes off the top of each lower segment; the top
+        // segment keeps its full height and the rounded cap.
+        const h = Math.max(0.6, y0 - y1 - (top ? 0 : GAP));
+        if (top) svg('path', { d: capRect(x, y1, bw, h, 4), fill: sg.k.color }, g);
+        else svg('rect', { x, y: y1, width: bw, height: h, fill: sg.k.color }, g);
+      });
+    }
+    const hit = svg('rect', { x: pad.l + i * iw, y: pad.t, width: iw, height: plotH,
+      fill: 'transparent', tabindex: 0 }, s);
+    hit.addEventListener('mouseenter', () => g.setAttribute('opacity', .78));
+    hit.addEventListener('mouseleave', () => g.removeAttribute('opacity'));
+    bindTip(hit, () => `${r.tip || r.label}\n` + kinds.map(k => {
+      const v = +r.split[k.key] || 0;
+      return `${k.label.padEnd(12)}${tok(v).padStart(8)}  ${
+        (total ? 100 * v / total : 0).toFixed(1).padStart(5)}%`;
+    }).join('\n') + `\n${'total'.padEnd(12)}${tok(total).padStart(8)}`);
+  });
+  const maxLabels = Math.max(2, Math.min(8, Math.floor((W - pad.l) / 80)));
+  const every = Math.max(1, Math.ceil(rows.length / maxLabels));
+  rows.forEach((r, i) => {
+    if (i % every !== 0 && i !== rows.length - 1) return;
+    if (i !== rows.length - 1 && (rows.length - 1 - i) * iw < 46) return;
+    const last = i === rows.length - 1;
+    const t = svg('text', {
+      class: 'axis-t', x: last ? W - pad.r : pad.l + i * iw + iw / 2, y: H - 5,
+      'text-anchor': last ? 'end' : i === 0 ? 'start' : 'middle',
+    }, s);
+    t.textContent = r.label || '';
+  });
+}
+
+/** Stacked area over time by kind — the session's tokens per call.
+    points: [{t, split}]. Layers are separated by a hairline in the surface
+    colour; a crosshair reads every kind at the nearest call. */
+function stackArea(host, points, opts = {}) {
+  const W = host.clientWidth || 700, H = opts.height || 170;
+  const pad = { t: 8, r: 8, b: 20, l: 46 };
+  const kinds = opts.kinds || KINDS, share = !!opts.share;
+  host.innerHTML = '';
+  if (points.length < 2) { host.innerHTML = '<div class="empty">Not enough calls yet</div>'; return; }
+  const tot = p => kinds.reduce((a, k) => a + (+p.split[k.key] || 0), 0);
+  const totals = points.map(tot);
+  const xs = points.map(p => p.t);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const sc = share ? { max: 1, ticks: [0, .25, .5, .75, 1] } : niceScale(Math.max(...totals));
+  const X = t => pad.l + (x1 === x0 ? 0 : (t - x0) / (x1 - x0)) * (W - pad.l - pad.r);
+  const Y = v => H - pad.b - (v / sc.max) * (H - pad.t - pad.b);
+  const s = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, height: H }, host);
+  for (const v of sc.ticks) {
+    const y = Y(v);
+    svg('line', { class: 'grid-line', x1: pad.l, x2: W - pad.r, y1: y, y2: y }, s);
+    const t = svg('text', { class: 'axis-t', x: 4, y: y + 3 }, s);
+    t.textContent = share ? Math.round(v * 100) + '%' : (opts.fmt || tok)(v);
+  }
+  if (x1 > x0) timeAxis(s, X, x0, x1, H - 5);
+  const tops = {};
+  let base = points.map(() => 0);
+  kinds.forEach((k, ki) => {
+    const top = points.map((p, i) => base[i] + (+p.split[k.key] || 0) *
+      (share ? (totals[i] ? 1 / totals[i] : 0) : 1));
+    tops[k.key] = top;
+    const fwd = points.map((p, i) =>
+      `${i ? 'L' : 'M'}${X(p.t).toFixed(1)},${Y(top[i]).toFixed(1)}`).join('');
+    const back = points.map((p, i) =>
+      `L${X(p.t).toFixed(1)},${Y(base[i]).toFixed(1)}`).reverse().join('');
+    svg('path', { d: fwd + back + 'Z', fill: k.color, 'fill-opacity': .72 }, s);
+    if (ki < kinds.length - 1)
+      svg('path', { d: fwd, fill: 'none', stroke: 'var(--card)', 'stroke-width': 1.5 }, s);
+    base = top;
+  });
+  const hit = svg('rect', { x: pad.l, y: pad.t, width: W - pad.l - pad.r,
+    height: H - pad.t - pad.b, fill: 'transparent' }, s);
+  const cross = svg('line', { class: 'grid-line', y1: pad.t, y2: H - pad.b, opacity: 0 }, s);
+  const mark = svg('circle', { r: 4, fill: 'var(--ink)', stroke: 'var(--card)',
+    'stroke-width': 2, opacity: 0 }, s);
+  hit.addEventListener('mousemove', e => {
+    const bb = s.getBoundingClientRect();
+    const px = (e.clientX - bb.left) * (W / bb.width);
+    let bi = 0, bd = Infinity;
+    points.forEach((p, i) => { const dd = Math.abs(X(p.t) - px); if (dd < bd) { bd = dd; bi = i; } });
+    const p = points[bi];
+    cross.setAttribute('x1', X(p.t)); cross.setAttribute('x2', X(p.t));
+    cross.setAttribute('opacity', 1);
+    mark.setAttribute('cx', X(p.t)); mark.setAttribute('cy', Y(base[bi]));
+    mark.setAttribute('opacity', 1);
+    const total = totals[bi];
+    tipEl.textContent = `${new Date(p.t * 1000).toLocaleString()}${
+      opts.head ? ' · ' + opts.head(p) : ''}\n` + kinds.map(k => {
+      const v = +p.split[k.key] || 0;
+      return `${k.label.padEnd(12)}${tok(v).padStart(8)}  ${
+        (total ? 100 * v / total : 0).toFixed(1).padStart(5)}%`;
+    }).join('\n') + `\n${'total'.padEnd(12)}${tok(total).padStart(8)}`;
+    tipEl.classList.add('on');
+    tipEl.style.left = Math.min(e.clientX + 13, innerWidth - 260) + 'px';
+    tipEl.style.top = Math.max(8, e.clientY - 20 - tipEl.getBoundingClientRect().height) + 'px';
+  });
+  hit.addEventListener('mouseleave', () => {
+    cross.setAttribute('opacity', 0); mark.setAttribute('opacity', 0); hideTip();
+  });
+}
+
+/** A stat tile for one token kind: the kind's colour as a dot, the count as
+    the figure, one line of context underneath, optional sparkline. */
+function kindTile(k, v, note, opts = {}) {
+  return `<div class="kpi kind">
+    <span class="ic" style="background:color-mix(in srgb,${k.color} 14%,transparent)"><i
+      class="kdot" style="background:${k.color}"></i></span>
+    <div class="k" title="${esc(k.note)}">${esc(k.label)}</div>
+    <div class="v">${tok(v)}</div>
+    ${note ? `<span class="delta ${opts.cls || 'info'}">${note}</span>` : ''}
+    ${opts.spark && opts.spark.some(x => x > 0)
+      ? `<span class="spk">${sparkSVG(opts.spark, 86, 30, k.hex)}</span>` : ''}
+  </div>`;
 }
 function heatmap(cells) {
   const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -934,22 +1176,165 @@ const todayChip = () => `<span class="datechip">📅 ${new Date().toLocaleDateSt
   undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</span>`;
 
 
-// Fan-out artwork for the overview card (decorative; stats carry the info).
-const FAN_ART = `<svg viewBox="0 0 220 130" width="100%" height="100" aria-hidden="true">
-<g fill="none" stroke="var(--vio)" stroke-width="3" stroke-linecap="round" opacity=".9">
-<path d="M28 65h32"/><path d="M60 65c28 0 20-38 48-38"/>
-<path d="M60 65c20 0 15 20 35 20"/><path d="M60 65h70"/>
-<path d="M130 65c24 0 18-23 40-23" opacity=".5"/>
-<path d="M95 85c18 0 13 21 33 21" opacity=".5"/></g>
-<circle cx="24" cy="65" r="10" fill="var(--card)" stroke="var(--vio)" stroke-width="3"/>
-<circle cx="110" cy="27" r="7" fill="var(--gold)"/>
-<circle cx="132" cy="65" r="8" fill="var(--vio)"/>
-<circle cx="97" cy="85" r="6" fill="#16a34a"/>
-<circle cx="172" cy="42" r="6" fill="#d6456f"/>
-<circle cx="130" cy="106" r="5.5" fill="#38bdf8"/>
-<circle cx="110" cy="27" r="11.5" fill="none" stroke="var(--gold)" stroke-width="1.6" opacity=".4"/>
-<circle cx="132" cy="65" r="12.5" fill="none" stroke="var(--vio)" stroke-width="1.6" opacity=".4"/>
-</svg>`;
+/** Token-flow card: one API call drawn to a scope's shares — the whole
+    window, or one model. Three input streams converge on the model, one
+    output stream leaves it. Ribbon widths are linear in tokens (4px floor so
+    a 1% stream stays visible — the labels carry the exact counts); particles
+    travel along each ribbon, more of them on the busier streams, so it reads
+    as flow. Under it: the insight numbers, what each stream is billed at and
+    what it cost, and the window's spend at API list price.
+
+    scope: { win, ins, money, cells, modelLabel, sub, picker } */
+function flowCard(scope) {
+  const { win, ins, money, cells } = scope;
+  const W = 640, H = 184, x0 = 148, nodeX = 396, nodeW = 88, nodeH = 52, cy = 92;
+  const inputs = [KIND.fresh, KIND.resent, KIND.cache_read];
+  const inTotal = inputs.reduce((a, k) => a + (win[k.key] || 0), 0) || 1;
+  const grand = inTotal + (win.output || 0);
+  const width = v => Math.max(4, 34 * v / inTotal);
+  const ys = [30, 92, 154];
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const uid = 'fp' + (++gradSeq);
+  let n = 0;
+  const ribbon = (d, w, k, share) => {
+    const id = `${uid}-${++n}`;
+    // Particle count follows the stream's share; every stream keeps a couple
+    // so a 1% stream still visibly moves.
+    const count = still ? 0 : Math.max(2, Math.min(9, Math.round(9 * share)));
+    const dur = 3.2;
+    const dots = Array.from({ length: count }, (_, i) => `<circle class="dot" r="${
+      Math.min(3, 1.4 + w / 9).toFixed(1)}" fill="${k.color}">
+      <animateMotion dur="${dur}s" repeatCount="indefinite" begin="${
+        (-i * dur / count).toFixed(2)}s"><mpath href="#${id}"/></animateMotion></circle>`).join('');
+    return `<path id="${id}" class="band" d="${d}" stroke="${k.color}"
+      stroke-width="${w.toFixed(1)}"/>${dots}`;
+  };
+  // widest first so the thin streams stay on top
+  const order = inputs.map((k, i) => ({ k, y: ys[i], v: win[k.key] || 0 }))
+    .sort((a, b) => b.v - a.v);
+  const bands = order.map(({ k, y, v }) => ribbon(
+    `M${x0} ${y}C${x0 + 110} ${y},${nodeX - 100} ${cy},${nodeX} ${cy}`,
+    width(v), k, v / inTotal)).join('');
+  const outV = win.output || 0, outW = width(outV);
+  const outBand = ribbon(`M${nodeX + nodeW} ${cy}H${W - 8}`, outW, KIND.output,
+                         outV / inTotal);
+  const labels = inputs.map((k, i) => {
+    const v = win[k.key] || 0;
+    return `<text class="fl" x="8" y="${ys[i] - 4}">${esc(k.label)}</text>
+      <text class="fv" x="8" y="${ys[i] + 13}">${tok(v)}<tspan class="fs"> · ${
+      (100 * v / inTotal).toFixed(1)}% of input</tspan></text>`;
+  }).join('');
+  const spent = (money && money.perKind) || {};
+  const gid = uid + '-node';
+  return `<div class="flow">
+    <div class="fhead"><div><div class="cap">How your tokens flow</div>
+      <div class="sub2">${scope.sub}</div></div>
+      <div class="fsum"><b>${tok(grand)}</b><span>tokens</span></div></div>
+    ${scope.picker || ''}
+    <svg viewBox="0 0 ${W} ${H}" width="100%" role="img"
+      aria-label="Input streams converging on the model and the output stream leaving it">
+      <defs><linearGradient id="${gid}" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="var(--vio)" stop-opacity=".22"/>
+        <stop offset="1" stop-color="var(--vio)" stop-opacity=".06"/></linearGradient></defs>
+      <text class="fh" x="8" y="12">INPUT</text>
+      <text class="fh" x="${W - 8}" y="12" text-anchor="end">OUTPUT</text>
+      ${bands}${outBand}
+      <rect x="${nodeX}" y="${cy - nodeH / 2}" width="${nodeW}" height="${nodeH}" rx="14"
+        class="node" fill="url(#${gid})"/>
+      <text class="nl" x="${nodeX + nodeW / 2}" y="${cy - 5}" text-anchor="middle">model</text>
+      <text class="nv" x="${nodeX + nodeW / 2}" y="${cy + 12}" text-anchor="middle">${
+        esc(scope.modelLabel)}</text>
+      ${labels}
+      <text class="fl" x="${W - 8}" y="${(cy - outW / 2 - 9).toFixed(1)}" text-anchor="end">${
+        esc(KIND.output.label)}</text>
+      <text class="fv" x="${W - 8}" y="${(cy + outW / 2 + 18).toFixed(1)}" text-anchor="end">${
+        tok(outV)}<tspan class="fs"> · ${(100 * outV / (grand || 1)).toFixed(2)}% of all</tspan></text>
+    </svg>
+    <div class="insights">
+      <div><b>${rereadX(win.fresh ? win.cache_read / win.fresh : 0)}</b>
+        <span>each fresh token re-read, on average</span></div>
+      <div><b>${pct((win.fresh + win.resent) ? win.resent / (win.fresh + win.resent) : 0)}</b>
+        <span>of full-price input was re-sent, not new</span></div>
+      <div><b>${(ins.cache_misses || 0).toLocaleString()}</b>
+        <span>cache misses · ${pct(ins.calls_missed_share || 0)} of calls</span></div>
+    </div>
+    ${cells.length ? `<div class="rates" title="Rate: USD per million tokens. Spent: this scope's tokens at that rate, API list price.">${
+      cells.map(({ k, price, note }) => `<div class="rc">
+        <div class="rl"><span class="sw" style="background:${k.color}"></span>${esc(k.label)}</div>
+        <b>${esc(price)}<small>/MTok</small></b><span class="rn">${esc(note)}</span>
+        ${spent[k.key] != null ? `<span class="rm">≈ ${usd(spent[k.key])} spent</span>` : ''}
+      </div>`).join('')}</div>` : ''}
+    ${money ? `<div class="spend">
+      <div><b>${usd(money.spend)}</b><span>at API list price — without a plan</span></div>
+      <div><b>${usd(money.uncached)}</b><span>without prompt caching</span></div>
+      <div><b class="good">${usd(money.saved)}</b><span>saved by caching · ${
+        money.savedPct.toFixed(0)}%</span></div>
+    </div>` : ''}
+  </div>`;
+}
+
+/** Price per million tokens: whole dollars when whole, else cents. */
+const rate$ = v => '$' + (Math.abs(v - Math.round(v)) < 0.005 ? Math.round(v) : v.toFixed(2));
+/** The per-stream rate cells for one model's list prices. */
+function rateCells(rate, mult) {
+  const rIn = rate.input, rOut = rate.output;
+  const w = `${rate$(rIn * mult.write_5m)}–${rate$(rIn * mult.write_1h)}`;
+  return [
+    { k: KIND.fresh, price: w, note: `cache write · ${mult.write_5m}–${mult.write_1h}× input` },
+    { k: KIND.resent, price: w, note: 'written again · same rate' },
+    { k: KIND.cache_read, price: rate$(rIn * mult.read), note: `${mult.read}× input rate` },
+    { k: KIND.output, price: rate$(rOut), note: 'list output rate' },
+  ];
+}
+/** Effective per-stream rates when several models are blended: spend ÷ tokens. */
+function blendedCells(money, win) {
+  return KINDS.map(k => ({
+    k, price: rate$(win[k.key] ? money.perKind[k.key] / win[k.key] * 1e6 : 0),
+    note: 'effective, blended',
+  }));
+}
+/** Split the full-price input cost between fresh and re-sent by tokens —
+    both are billed at the cache-write rate, so this is exact bar the 5m/1h
+    tier mix — and return the per-stream spend. */
+function perKindSpend(costByType, win, scale = 1) {
+  const full = ((costByType.input || 0) + (costByType.cache_write_5m || 0) +
+                (costByType.cache_write_1h || 0)) * scale;
+  const fp = win.fresh + win.resent;
+  return {
+    fresh: fp ? full * win.fresh / fp : 0,
+    resent: fp ? full * win.resent / fp : 0,
+    cache_read: (costByType.cache_read || 0) * scale,
+    output: (costByType.output || 0) * scale,
+  };
+}
+function flowPicker(models) {
+  return `<div class="tmode flowpick" role="group" aria-label="Model">${
+    [{ key: '', label: 'All models' }, ...models].map(m => `<button type="button"
+      data-fm="${esc(m.key)}" class="${m.key === state.flowModel ? 'on' : ''}">${
+      esc(m.label)}</button>`).join('')}</div>`;
+}
+function wireFlowPick(root) {
+  $$('.flowpick button[data-fm]', root || document).forEach(b =>
+    b.addEventListener('click', () => {
+      state.flowModel = b.dataset.fm;
+      localStorage.setItem('cm.flowmodel', state.flowModel);
+      const y = scrollY;
+      route(true).then(() => scrollTo(0, y));
+    }));
+}
+
+/** Compact stat row for the overview: dot · label + note · value · sparkline. */
+function kindRow(k, v, note, opts = {}) {
+  return `<div class="kpi krow">
+    <span class="ic" style="background:color-mix(in srgb,${k.color} 14%,transparent)"><i
+      class="kdot" style="background:${k.color}"></i></span>
+    <div class="kt"><div class="k" title="${esc(k.note)}">${esc(k.label)}</div>
+      ${note ? `<span class="delta ${opts.cls || 'info'}">${note}</span>` : ''}</div>
+    <div class="v">${tok(v)}</div>
+    ${opts.spark && opts.spark.some(x => x > 0)
+      ? `<span class="spk">${sparkSVG(opts.spark, 78, 28, k.hex)}</span>` : ''}
+  </div>`;
+}
 
 views.overview = async () => {
   const [d, live] = await Promise.all([
@@ -968,23 +1353,73 @@ views.overview = async () => {
   if (pressured.length) {
     const s0 = pressured[0];
     alerts.push(`<div class="alert amb">⚠ <span><b>${esc(s0.project)}</b> context is at
-      <b>${(s0.current_context / 1e4 / 100).toFixed(1)}%</b> of the 1M window —
+      <b>${(s0.current_context / 1e4).toFixed(1)}%</b> of the 1M window —
       compaction soon.</span></div>`);
   }
 
   const daily = d.daily || [];
   const dailyCost = daily.map(r => r.cost);
-  const cumSeries = [];
-  let run = 0;
-  for (const v of dailyCost) { run += v; cumSeries.push(run); }
-  // Window numbers come from the same per-day series the chart draws, so the
-  // headline and the chart always agree. totals (t.*) counts whole sessions
-  // active in the window — a straddling session's whole bill — which is a
-  // different (bigger) number; it still backs the counts, not the spend.
+  // Window numbers come from the same per-day series the charts draw, so the
+  // tiles, the ring and the columns always agree. totals (t.*) counts whole
+  // sessions active in the window — a straddling session's whole bill —
+  // which is a different (bigger) number; it still backs the counts.
   const windowSpend = dailyCost.reduce((a, b) => a + b, 0);
   const windowUncached = daily.reduce((a, r) => a + (r.uncached || 0), 0);
   const winSaved = Math.max(0, windowUncached - windowSpend);
   const winSavedPct = windowUncached ? 100 * winSaved / windowUncached : 0;
+  const win = { fresh: 0, resent: 0, cache_read: 0, output: 0 };
+  for (const r of daily) for (const k of KINDS) win[k.key] += r[k.key] || 0;
+  const winTotal = splitTotal(win);
+  const ins = d.insights || { cache_misses: 0, calls_missed_share: 0 };
+  const series = key => daily.map(r => r[key] || 0);
+  // What the sparkline beside each row is saying: the latest day against
+  // the window's busiest one.
+  const trend = xs => xs.length
+    ? `today ${tok(xs[xs.length - 1])} · peak ${tok(Math.max(...xs))}/day` : '';
+  const kinds = modeKinds(), share = modeShare();
+
+  // The flow card's scope: the whole window (per-day series, so it agrees
+  // with the chart and the spend fold) or one model (its own bucket — the
+  // sessions active in the window — priced exactly at its own rates).
+  const mult = d.cache_mult || { write_5m: 1.25, write_1h: 2, read: 0.1 };
+  const modelsUsed = (d.models || []).filter(m => m.tokens > 0 && m.cost > 0)
+    .sort((a, b) => b.tokens - a.tokens).slice(0, 6);
+  if (state.flowModel && !modelsUsed.some(m => m.key === state.flowModel)) state.flowModel = '';
+  const picked = modelsUsed.find(m => m.key === state.flowModel);
+  let scope;
+  if (picked) {
+    const r = d.rates[picked.key] || { input: 0, output: 0, label: picked.label };
+    const wm = picked.split;
+    const savedM = Math.max(0, picked.uncached_cost - picked.cost);
+    const moneyM = {
+      spend: picked.cost, uncached: picked.uncached_cost, saved: savedM,
+      savedPct: picked.uncached_cost ? 100 * savedM / picked.uncached_cost : 0,
+      perKind: perKindSpend(picked.cost_by_type || {}, wm),
+    };
+    scope = {
+      win: wm, money: moneyM, modelLabel: r.label,
+      ins: { cache_misses: picked.cache_misses || 0,
+             calls_missed_share: picked.api_calls ? (picked.cache_misses || 0) / picked.api_calls : 0 },
+      cells: rateCells(r, mult),
+      sub: `One ${esc(r.label)} call, drawn to its shares · sessions active in the last ${
+        winLabel()} · ${esc(r.label)} list rates.`,
+    };
+  } else {
+    const scale = e.total_cost ? windowSpend / e.total_cost : 0;
+    const moneyW = {
+      spend: windowSpend, uncached: windowUncached, saved: winSaved, savedPct: winSavedPct,
+      perKind: perKindSpend(e.cost || {}, win, scale),
+    };
+    const one = modelsUsed.length === 1 ? d.rates[modelsUsed[0].key] : null;
+    scope = {
+      win, money: moneyW, ins,
+      modelLabel: one ? one.label : `${modelsUsed.length} models`,
+      cells: one ? rateCells(one, mult) : blendedCells(moneyW, win),
+      sub: `One API call, drawn to this window's shares${one
+        ? ` · ${esc(one.label)} list rates` : ' · rates blended across models'}.`,
+    };
+  }
+  scope.picker = modelsUsed.length > 1 ? flowPicker(modelsUsed) : '';
 
   const sessData = await api('/api/sessions', { sort: 'recent', limit: 8 });
   const rows = sessData.sessions.map(s => {
@@ -994,11 +1429,14 @@ views.overview = async () => {
       av: avatar(s.project),
       sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>${actHTML(s)}`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
-      tk: tok(s.tokens), ag: agentsCell(s),
+      tk: `${tok(s.tokens)}${tokBar(s.split)}`, out: tok(s.output_tokens),
+      ag: agentsCell(s),
       cost: usd(s.cost), st: stPill(st),
       when: `<span class="dur">${ago(s.ended)}</span>`,
     };
   });
+
+  const byTokens = list => list.slice().sort((a, b) => b.tokens - a.tokens);
 
   $('#view').innerHTML = `
     <div class="hd">
@@ -1013,36 +1451,24 @@ views.overview = async () => {
     <div class="sect">Dashboard overview</div>
     <div class="hero">
       <div class="illus">
-        <div class="cap">One orchestrator, many hands</div>
-        <div class="sub2">${t.agents.toLocaleString()} subagents fanned out in the
-          last ${winLabel()} — peak parallelism ×${d.peak_parallelism || 1}.</div>
-        ${FAN_ART}
+        ${flowCard(scope)}
       </div>
 
-      <div class="kpis" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:0">
-        <div class="kpi">
-          <span class="ic" style="background:color-mix(in srgb,var(--vio) 12%,transparent);color:var(--vio-text)">$</span>
-          <div class="k">Actual spend</div>
-          <div class="v">${usd(windowSpend)}</div>
-          <span class="delta up">↓ ${winSavedPct.toFixed(0)}% vs uncached list</span>
-          <span class="spk">${sparkSVG(dailyCost, 86, 30, '#16a34a')}</span>
-        </div>
-        <div class="kpi">
-          <span class="ic" style="background:var(--red-bg);color:var(--red)">⧗</span>
-          <div class="k">Real cost / 1M output</div>
-          <div class="v">${usd(e.effective_output_rate)}</div>
-          <span class="delta bad">↑ ${e.multiple_of_list.toFixed(0)}× the list rate</span>
-          <span class="spk">${sparkSVG(cumSeries, 86, 30, '#dc2626')}</span>
-        </div>
-        <div class="kpi">
-          <span class="ic" style="background:var(--amber-bg);color:var(--amber)">⧉</span>
-          <div class="k">Output of total tokens</div>
-          <div class="v">${tok(e.tokens.output)} <small>/ ${tok(t.tokens)}</small></div>
-          <span class="delta warn">${(100 * e.output_share).toFixed(2)}% is new work</span>
-        </div>
+      <div class="kpis krows">
+        ${KINDS.map(k => kindRow(k, win[k.key], trend(series(k.key)),
+          { cls: 'info', spark: series(k.key) })).join('')}
       </div>
-
     </div>
+
+    <section class="blk">
+      <div class="card">
+        <div class="ch"><h2>Tokens per day</h2>
+          <span class="meta">${tok(winTotal)} in the last ${winLabel()}</span>
+          <div class="chacts">${tokModePicker()}</div></div>
+        <div class="cb"><div id="tokDaily"></div>${
+          legend(kinds.map(k => [k.label, k.color]))}</div>
+      </div>
+    </section>
 
     <section class="blk" style="display:grid;grid-template-columns:1fr minmax(300px,380px);gap:16px">
       <div class="card">
@@ -1053,8 +1479,9 @@ views.overview = async () => {
           { h: 'Project', key: 'sess', grow: 1, link: 1 },
           { h: 'Model', key: 'model' },
           { h: 'Tokens', key: 'tk', n: 1 },
+          { h: 'Output', key: 'out', n: 1 },
           { h: 'Agents', key: 'ag', n: 1 },
-          { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
+          { h: 'Cost', key: 'cost', n: 1, cls: 'dim' },
           { h: 'Status', key: 'st' },
           { h: 'Last write', key: 'when', n: 1 },
         ], rows)}</div>
@@ -1062,60 +1489,79 @@ views.overview = async () => {
       <div style="display:flex;flex-direction:column;gap:16px">
         <div class="card">
           <div class="ch"><h2>By project</h2><a class="meta" href="#/cost">Cost →</a></div>
-          <div class="cb">${barList(foldTail(d.projects.map(p => ({
-            label: p.key, value: p.cost, text: usd(p.cost),
-            sub: (100 * p.cost / (t.cost || 1)).toFixed(0) + '%',
+          <div class="cb">${barList(foldTail(byTokens(d.projects).map(p => ({
+            label: p.key, value: p.tokens, text: tok(p.tokens),
+            sub: usd(p.cost),
             href: `#/sessions?project=${encodeURIComponent(p.key)}`,
-            fmt: usd,
-            tip: `${p.sessions} sessions · ${p.agents} agents\n${tok(p.tokens)} tokens`,
-          })), 5))}
-          <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:12px;
-            display:flex;justify-content:space-between;font-size:12.5px">
-            <span class="mut">Cache saved in this window</span>
-            <b style="color:var(--green)" class="num">${usd(winSaved)}
-              (${winSavedPct.toFixed(0)}%)</b></div>
-          </div>
+            fmt: tok,
+            tip: `${p.sessions} sessions · ${p.agents} agents\n${
+              tok(p.split.fresh)} fresh · ${tok(p.split.resent)} re-sent · ${
+              tok(p.split.cache_read)} cache read · ${tok(p.split.output)} output`,
+          })), 5))}</div>
         </div>
         <div class="card" style="flex:1">
           <div class="ch"><h2>Models</h2></div>
-          <div class="cb">${barList(d.models.filter(m => m.cost > 0).slice(0, 4)
+          <div class="cb">${barList(byTokens(d.models.filter(m => m.tokens > 0)).slice(0, 4)
             .map((m, i) => ({
-              label: m.label, value: m.cost, color: SERIES[i], text: usd(m.cost),
-              sub: (100 * m.cost / (t.cost || 1)).toFixed(0) + '%',
-              tip: `${m.api_calls.toLocaleString()} calls · ${tok(m.tokens)} tokens`,
+              label: m.label, value: m.tokens, color: SERIES[i], text: tok(m.tokens),
+              sub: usd(m.cost),
+              tip: `${m.api_calls.toLocaleString()} calls\n${
+                tok(m.split.fresh)} fresh · ${tok(m.split.resent)} re-sent · ${
+                tok(m.split.cache_read)} cache read · ${tok(m.split.output)} output`,
             })))}</div>
         </div>
       </div>
     </section>
 
-    <section class="blk" style="display:grid;
-        grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px">
-      <div class="card">
-        <div class="ch"><h2>Spend per day</h2>
-          <span class="meta">peak ${usd(Math.max(...dailyCost, 0))}/day</span></div>
-        <div class="cb"><div id="dailyBars"></div></div>
-      </div>
-      <div class="card">
-        <div class="ch"><h2>Spend, cumulative</h2>
-          <span class="meta" style="color:var(--green)">${
-            usd(windowSpend)} in the last ${winLabel()}</span></div>
-        <div class="cb"><div id="wave"></div></div>
-      </div>
-    </section>
+    <section class="blk">${foldSection('ov.spend', 'Spend',
+      `≈ ${usd(windowSpend)} in the last ${winLabel()} · ${usd(winSaved)} (${
+        winSavedPct.toFixed(0)}%) saved by caching · ${
+        usd(e.effective_output_rate)} real cost / 1M output`, `
+      <div class="grid cols2">
+        <div class="card">
+          <div class="ch"><h2>Spend per day</h2>
+            <span class="meta">peak ${usd(Math.max(...dailyCost, 0))}/day</span></div>
+          <div class="cb"><div id="dailyBars"></div></div>
+        </div>
+        <div class="card">
+          <div class="ch"><h2>Spend, cumulative</h2>
+            <span class="meta">${usd(windowSpend)} in the last ${winLabel()}</span></div>
+          <div class="cb"><div id="wave"></div></div>
+        </div>
+      </div>`)}</section>
 
     <footer class="pagefoot"><span>Transcripts never leave this machine — the only
         network call is to Anthropic, for your plan limits.</span>
-      <span>All figures are API list-price equivalents, not amounts billed.</span></footer>`;
+      <span>Dollar figures are API list-price equivalents, not amounts billed.</span></footer>`;
 
   hydrateTips($('#view'));
   wireTable($('#view'));
   wireWindow($('#view'));
+  wireFolds($('#view'));
+  wireTokMode($('#view'));
+  wireFlowPick($('#view'));
+  stackChart($('#tokDaily'), daily.map(r => ({
+    label: r.date.slice(5).replace('-', '/'), tip: r.date,
+    split: { fresh: r.fresh, resent: r.resent,
+             cache_read: r.cache_read, output: r.output },
+  })), { height: 232, kinds, share });
   colChart($('#dailyBars'), daily.map(r => ({
     v: r.cost, label: r.date.slice(5),
     tip: `${r.date}\n${usd(r.cost)} · ${r.sessions} sessions`,
   })), { height: 248 });
   waveChart($('#wave'), daily, { height: 248 });
 };
+
+// Cost-composition rows (label, economics key, colour). Cache-write tiers
+// split here because they price differently; both wear the cache-write hue's
+// neighbourhood, and every other row keeps its token kind's colour.
+const COST_ROWS = [
+  ['Cache read', 'cache_read', KIND.cache_read.color],
+  ['Cache write · 5m', 'cache_write_5m', KIND.resent.color],
+  ['Cache write · 1h', 'cache_write_1h', 'var(--s5)'],
+  ['Output', 'output', KIND.output.color],
+  ['Input, uncached', 'input', KIND.fresh.color],
+];
 
 // ── crumbs (session-rooted; a project is just a label on a session) ───
 const crumb = (...parts) => `<div class="crumb">${parts.join(' / ')}</div>`;
@@ -1184,11 +1630,12 @@ views.sessions = async (params) => {
     const st = sessStatus(s);
     return {
       _href: `#/session/${s.id}`,
-      id: `#${esc(s.short.slice(0, 6))}`,
-      sess: `<b>${esc(s.project)}</b><span class="tp">${esc(s.title)}</span>${actHTML(s)}`,
+      sess: `<b>${esc(s.project)}</b><span class="tp"><span class="sid">#${
+        esc(s.short.slice(0, 6))}</span> ${esc(s.title)}</span>${actHTML(s)}`,
       model: `<span class="mchip">${esc(s.model_label)}</span>`,
-      turns: s.turns, calls: s.api_calls.toLocaleString(),
-      ag: agentsCell(s), tk: tok(s.tokens), cx: tok(s.peak_context),
+      turns: `<span title="${s.api_calls.toLocaleString()} API calls">${s.turns}</span>`,
+      ag: agentsCell(s), tk: `${tok(s.tokens)}${tokBar(s.split)}`,
+      out: tok(s.output_tokens), cx: tok(s.peak_context),
       cost: usd(s.cost), st: stPill(st),
       when: `<span class="dur">${ago(s.ended)}</span>`,
     };
@@ -1214,15 +1661,14 @@ views.sessions = async (params) => {
     </div>
     ${sessionWindowCard(plan)}
     ${table([
-      { h: 'ID', key: 'id' },
       { h: 'Project', key: 'sess', grow: 1, link: 1, sort: 'recent' },
       { h: 'Model', key: 'model' },
       { h: 'Turns', key: 'turns', n: 1, sort: 'turns' },
-      { h: 'Calls', key: 'calls', n: 1 },
       { h: 'Agents', key: 'ag', n: 1, sort: 'agents' },
       { h: 'Tokens', key: 'tk', n: 1, sort: 'tokens' },
-      { h: 'Peak context', key: 'cx', n: 1, sort: 'context' },
-      { h: 'Cost', key: 'cost', n: 1, sort: 'cost', cls: 'cost' },
+      { h: 'Output', key: 'out', n: 1 },
+      { h: 'Peak ctx', key: 'cx', n: 1, sort: 'context' },
+      { h: 'Cost', key: 'cost', n: 1, sort: 'cost', cls: 'dim' },
       { h: 'Status', key: 'st' },
       { h: 'Last write', key: 'when', n: 1, sort: 'recent' },
     ], rows, {
@@ -1232,6 +1678,7 @@ views.sessions = async (params) => {
         : '<b>No sessions in this window</b>Widen the time window to see older work.',
     })}`;
 
+  hydrateTips($('#view'));
   wireTable($('#view'), k => setParam('sort', k));
   wireWindow($('#view'));
   wireFolds($('#view'));
@@ -1257,14 +1704,15 @@ views.session = async (params, sid) => {
   }
   const e = s.economics;
   const st = sessStatus(s);
-  const typeRows = [
-    ['Cache read', 'cache_read', SERIES[0]],
-    ['Cache write · 5m', 'cache_write_5m', SERIES[1]],
-    ['Cache write · 1h', 'cache_write_1h', SERIES[2]],
-    ['Output', 'output', SERIES[3]],
-    ['Input, uncached', 'input', SERIES[4]],
-  ];
+  const typeRows = COST_ROWS;
   const toolCalls = Object.values(s.tools).reduce((a, b) => a + b, 0);
+  const split = s.split;
+  const sIns = s.insights || { reread_x: 0, resent_share: 0, cache_misses: 0 };
+  const total = splitTotal(split), inp = splitInput(split);
+  const running = s.agents.filter(a => a.state === 'running').length;
+  const kinds = modeKinds(), share = modeShare();
+  const hb = s.hourly || [];
+  const hasHourly = hb.some(b => b.cost > 0 || b.out > 0);
 
   $('#view').innerHTML = `
     ${crumb(sessionsLink(), esc(s.short))}
@@ -1272,7 +1720,10 @@ views.session = async (params, sid) => {
       <div><h1>${esc(s.title)}</h1>
         <p class="sub">${esc(s.project)} · ${esc(s.branch || 'no branch')} ·
           ${esc(s.model_label)} · started ${dt(s.started)} · CLI ${
-          esc(s.version || '?')}</p></div>
+          esc(s.version || '?')}</p>
+        <p class="sub costline" title="API list-price equivalent — not an amount billed">≈ ${
+          usd(s.cost)} list-price · ${usd(s.cost_main)} main + ${usd(s.cost_agents)} agents · ${
+          usd(s.uncached_cost - s.cost_main)} saved by caching</p></div>
       <div class="right">${stPill(st)}${s.live ?
         `<span class="mchip">PID ${s.pid} · ${s.cpu.toFixed(0)}% CPU · ${
           (s.rss / 1048576).toFixed(0)} MB</span>` : ''}</div>
@@ -1281,42 +1732,53 @@ views.session = async (params, sid) => {
     ${nowPanel(s, s.agents.filter(a => a.state === 'running'))}
 
     <div class="kpis">
-      ${[[usd(s.cost), 'Total cost', `${usd(s.cost_main)} main + ${usd(s.cost_agents)} agents`],
-         [tok(s.usage.total), 'Tokens', `${pct(s.usage.cache_hit_rate)} cached`],
-         [tok(s.peak_context), 'Peak context', 'largest single call'],
+      <div class="kpi">
+        <div class="k">Tokens</div><div class="v">${tok(total)}</div>
+        ${tokBar(split, { cls: 'wide' })}
+        <div class="k sub2">${s.api_calls.toLocaleString()} API calls · incl. agents</div>
+      </div>
+      ${kindTile(KIND.fresh, split.fresh, `re-read ${rereadX(sIns.reread_x)} on average`)}
+      ${kindTile(KIND.resent, split.resent,
+        `${pct(sIns.resent_share)} of full-price input · ${sIns.cache_misses} misses`,
+        { cls: split.resent > split.fresh * 0.5 ? 'bad' : 'warn' })}
+      ${kindTile(KIND.cache_read, split.cache_read,
+        `${pct(inp ? split.cache_read / inp : 0)} hit rate`, { cls: 'up' })}
+      ${kindTile(KIND.output, split.output,
+        `${(total ? 100 * split.output / total : 0).toFixed(2)}% of all`, { cls: 'warn' })}
+    </div>
+    <div class="kpis">
+      ${[[tok(s.peak_context), 'Peak context', 'largest single call'],
          [s.turns, 'Your turns', `${s.api_calls.toLocaleString()} API calls`],
          [s.agents.length, 'Subagents',
-          `${(r2 => r2 ? `${r2} running now · ` : '')(
-            s.agents.filter(a => a.state === 'running').length)}${
-            s.tool_errors} tool errors`],
+          `${running ? `${running} running now · ` : ''}${s.tool_errors} tool errors`],
          [`<span class="dur">${dur(s.active_s)}</span>`, 'Generating',
-          `of <span class="dur">${dur(s.duration_s)}</span> elapsed`]]
+          `of <span class="dur">${dur(s.duration_s)}</span> elapsed · ${
+            s.output_tps.toFixed(0)} tok/s out`]]
         .map(([v, k, n]) => `<div class="kpi">
           <div class="k">${k}</div><div class="v">${v}</div>
-          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
+          <div class="k sub2">${n}</div></div>`).join('')}
     </div>
 
-    <section class="blk grid cols4">
+    <section class="blk grid ${hasHourly ? 'cols3' : 'cols2'}">
+      <div class="card"><div class="ch"><h2>Tokens per call</h2>
+        <div class="chacts">${tokModePicker()}</div></div>
+        <div class="cb"><div id="tokCalls"></div>${
+          legend(kinds.map(k => [k.label, k.color]))}</div></div>
+      ${hasHourly ? `
+      <div class="card"><div class="ch"><h2>Tokens / hour</h2>
+        <span class="meta">24h · incl. agents</span></div>
+        <div class="cb"><div id="hrTok"></div>${
+          legend(kinds.map(k => [k.label, k.color]))}</div></div>` : ''}
       <div class="card"><div class="ch"><h2>Context growth</h2>
         <span class="meta">per call</span></div>
         <div class="cb"><div id="ctxChart"></div></div></div>
-      ${(s.hourly || []).some(b => b.cost > 0 || b.out > 0) ? `
-      <div class="card"><div class="ch"><h2>Output tok / hour</h2>
-        <span class="meta">24h · incl. agents</span></div>
-        <div class="cb"><div id="hrTok"></div></div></div>
-      <div class="card"><div class="ch"><h2>Spend / hour</h2>
-        <span class="meta">24h · incl. agents</span></div>
-        <div class="cb"><div id="hrCost"></div></div></div>` : ''}
-      <div class="card"><div class="ch"><h2>Cumulative spend</h2>
-        <span class="meta">incl. agents</span></div>
-        <div class="cb"><div id="costChart"></div></div></div>
     </section>
 
     <section class="blk">${foldSection('sess.detail', 'Cost, tools & models',
-      `${usd(s.uncached_cost - s.cost_main)} saved by caching · ${
+      `≈ ${usd(s.cost)} · ${usd(s.uncached_cost - s.cost_main)} saved by caching · ${
         toolCalls.toLocaleString()} tool call${toolCalls === 1 ? '' : 's'} · ${
         s.models.length} model${s.models.length === 1 ? '' : 's'}`, `
-    <div class="grid cols3">
+    <div class="grid cols4">
       <div class="card"><div class="ch"><h2>Cost composition</h2></div>
         <div class="cb">${barList(typeRows.slice()
           .sort((a, b) => e.cost[b[1]] - e.cost[a[1]])
@@ -1333,6 +1795,9 @@ views.session = async (params, sid) => {
           <dt>Real cost / 1M output</dt><dd>${usd(e.effective_output_rate)}</dd>
           <dt>Avg output rate</dt><dd>${s.output_tps.toFixed(0)} tok/s</dd>
         </dl></div></div>
+      <div class="card"><div class="ch"><h2>Cumulative spend</h2>
+        <span class="meta">incl. agents</span></div>
+        <div class="cb"><div id="costChart"></div></div></div>
       <div class="card"><div class="ch"><h2>Tools</h2>
         <span class="meta">${toolCalls} calls
           · click one for detail</span></div>
@@ -1343,33 +1808,37 @@ views.session = async (params, sid) => {
         <div class="ch"><h2>Models used</h2>
           <span class="meta">${s.models.length}</span></div>
         <div class="cb">${barList(
-          s.models.map((m, i) => ({ label: m.label, value: m.cost,
+          s.models.map((m, i) => ({ label: m.label, value: m.tokens,
             color: SERIES[i % SERIES.length],
-            text: usd(m.cost), sub: `${m.calls} calls`, tip: `${tok(m.tokens)} tokens` })))}
+            text: tok(m.tokens), sub: `${m.calls} calls`,
+            tip: `${tok(m.output)} output · ${usd(m.cost)}` })))}
         </div></div>
     </div>`)}</section>
 
     ${s.agents.length ? `<section class="blk"><div class="card">
-      <div class="ch"><h2>Subagents</h2><span class="meta">${usd(s.cost_agents)} total</span></div>
+      <div class="ch"><h2>Subagents</h2><span class="meta">${
+        tok(s.agents.reduce((a, x) => a + x.tokens, 0))} tokens · ${usd(s.cost_agents)}</span></div>
       ${sessWfs.length ? `<div class="wfstrip">${sessWfs.map(w => `
         <a class="wfchip" href="#/workflow/${esc(w.session_id)}/${esc(w.id)}"
           title="${esc(w.topic || '')}">⑃ ${
           esc(w.name || (w.topic ? w.topic.slice(0, 34) : w.short))}
           <span class="num">${w.completed}/${w.agents}</span>${
           w.running ? `<span class="agr"><i></i>${w.running}</span>` : ''}
-          <span class="num">${usd(w.cost)}</span></a>`).join('')}</div>` : ''}
+          <span class="num">${tok(w.tokens)}</span></a>`).join('')}</div>` : ''}
       <div class="cb" style="padding:4px 0 0">${table([
         { h: 'Topic', key: 'topic', grow: 1, link: 1 },
         { h: 'Type', key: 'type' }, { h: 'Model', key: 'model' },
         { h: 'Calls', key: 'calls', n: 1 }, { h: 'Tokens', key: 'tk', n: 1 },
-        { h: 'Time', key: 'time', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'cost' },
+        { h: 'Output', key: 'out', n: 1 },
+        { h: 'Time', key: 'time', n: 1 }, { h: 'Cost', key: 'cost', n: 1, cls: 'dim' },
         { h: 'Status', key: 'st' }, { h: 'Started', key: 'when', n: 1 }],
         s.agents.map(a => ({
           _href: `#/agent/${s.id}/${a.id}`,
           topic: esc(a.topic),
           type: `<span class="mut">${esc(a.type)}</span>`,
           model: `<span class="mchip">${esc(a.model_label)}</span>`,
-          calls: a.api_calls, tk: tok(a.tokens),
+          calls: a.api_calls, tk: `${tok(a.tokens)}${tokBar(a.split)}`,
+          out: tok(a.output_tokens),
           time: `<span class="dur">${dur(a.duration_s)}</span>`,
           cost: usd(a.cost), st: agentPill(a.state),
           when: `<span class="dur">${ago(a.started)}</span>`,
@@ -1405,15 +1874,20 @@ untruncated, with timestamps and per-prompt stats">JSON</a>` : ''}
   hydrateTips($('#view'));
   wireTable($('#view'));
   wireFolds($('#view'));
+  wireTokMode($('#view'));
   const toolsHost = $('#toolsBody');
   if (toolsHost) wireToolRows(toolsHost, s.id);
   const tl = s.timeline;
+  stackArea($('#tokCalls'), tl.map(p => ({
+    t: p.t, split: { fresh: p.fresh, resent: p.resent,
+                     cache_read: p.cache_read, output: p.out },
+  })), { height: 150, kinds, share });
   lineChart($('#ctxChart'), tl.map(p => ({ t: p.t, v: p.ctx })), {
     height: 150, color: '#e8930c', hex: '#e8930c',
     label: p => `${new Date(p.t * 1000).toLocaleString()}\ncontext ${tok(p.v)} tokens`,
   });
-  // spend_curve folds agent costs in, so the line ends at the Total cost KPI
-  // instead of at the main-thread subtotal.
+  // spend_curve folds agent costs in, so the line ends at the session's
+  // total cost instead of at the main-thread subtotal.
   let run = 0;
   const curve = (s.spend_curve && s.spend_curve.length)
     ? s.spend_curve
@@ -1422,20 +1896,16 @@ untruncated, with timestamps and per-prompt stats">JSON</a>` : ''}
     height: 150, fmt: usdAxis,
     label: p => `${new Date(p.t * 1000).toLocaleString()}\n${usd(p.v)} spent`,
   });
-  const hb = s.hourly || [];
-  if (hb.some(b => b.cost > 0 || b.out > 0)) {
+  if (hasHourly) {
     const hl = t => new Date(t * 1000).toLocaleTimeString(undefined,
       { hour: 'numeric' });
     const hd = t => new Date(t * 1000).toLocaleString(undefined,
       { weekday: 'short', hour: '2-digit', minute: '2-digit' });
-    colChart($('#hrCost'), hb.map(b => ({
-      v: b.cost, label: hl(b.t),
-      tip: `${hd(b.t)} – ${hl(b.t + 3600)}\n${usd(b.cost)} spent`,
-    })), { height: 150 });
-    colChart($('#hrTok'), hb.map(b => ({
-      v: b.out, label: hl(b.t),
-      tip: `${hd(b.t)} – ${hl(b.t + 3600)}\n${tok(b.out)} output tokens`,
-    })), { height: 150, color: 'var(--gold)', fmt: tok });
+    stackChart($('#hrTok'), hb.map(b => ({
+      label: hl(b.t), tip: `${hd(b.t)} – ${hl(b.t + 3600)}`,
+      split: { fresh: b.fresh, resent: b.resent,
+               cache_read: b.cache_read, output: b.out },
+    })), { height: 150, kinds, share });
   }
 };
 
@@ -1453,16 +1923,26 @@ views.agent = async (params, sid, aid) => {
     </div>
     ${a.owns ? `<p class="sub" style="margin:-8px 0 14px"><code>${esc(a.owns)}</code></p>` : ''}
     <div class="kpis">
-      ${[[usd(a.cost), 'Cost', `${a.api_calls} API calls`],
-         [tok(a.tokens), 'Tokens', `${pct(a.cache_hit_rate)} cached`],
-         [tok(a.output_tokens), 'Output', `${a.output_tps.toFixed(0)} tok/s`],
-         [`<span class="dur">${dur(a.duration_s)}</span>`, 'Duration',
+      <div class="kpi">
+        <div class="k">Tokens</div><div class="v">${tok(a.tokens)}</div>
+        ${tokBar(a.split, { cls: 'wide' })}
+        <div class="k sub2">${a.api_calls} API calls · ≈ ${usd(a.cost)} list-price</div>
+      </div>
+      ${kindTile(KIND.fresh, a.split.fresh,
+        `re-read ${rereadX((a.insights || {}).reread_x)} on average`)}
+      ${kindTile(KIND.resent, a.split.resent,
+        `${(a.insights || {}).cache_misses || 0} cache misses`, { cls: 'warn' })}
+      ${kindTile(KIND.cache_read, a.split.cache_read, `${pct(a.cache_hit_rate)} hit rate`,
+        { cls: 'up' })}
+      ${kindTile(KIND.output, a.output_tokens, `${a.output_tps.toFixed(0)} tok/s`,
+        { cls: 'warn' })}
+      ${[[`<span class="dur">${dur(a.duration_s)}</span>`, 'Duration',
           `started ${ago(a.started)} · ${dt(a.started)}`],
          [a.tool_errors, 'Tool errors', `${Object.values(a.tools)
            .reduce((x, y) => x + y, 0)} tool calls`]]
         .map(([v, k, n]) => `<div class="kpi"><div class="k">${k}</div>
           <div class="v">${v}</div>
-          <div class="k" style="margin-top:6px;font-weight:400">${n}</div></div>`).join('')}
+          <div class="k sub2">${n}</div></div>`).join('')}
     </div>
     <section class="blk grid cols2">
       <div class="card"><div class="ch"><h2>Tools used</h2></div>
@@ -2409,13 +2889,7 @@ views.cost = async (params) => {
   const wUncached = d.daily.reduce((a, r) => a + (r.uncached || 0), 0);
   const wSaved = Math.max(0, wUncached - wSpend);
   const wSavedPct = wUncached ? 100 * wSaved / wUncached : 0;
-  const typeRows = [
-    ['Cache read', 'cache_read', SERIES[0]],
-    ['Cache write · 5m', 'cache_write_5m', SERIES[1]],
-    ['Cache write · 1h', 'cache_write_1h', SERIES[2]],
-    ['Output', 'output', SERIES[3]],
-    ['Input, uncached', 'input', SERIES[4]],
-  ];
+  const typeRows = COST_ROWS;
   $('#view').innerHTML = `
     <div class="hd"><div><h1>Cost${project ? ` — ${esc(project)}` : ''}</h1>
       <p class="sub">Last ${winLabel()} · all figures are API list-price equivalents,
@@ -2672,10 +3146,12 @@ async function poll() {
     $('#sideLive').innerHTML = n
       ? `<i></i>${n} session${n > 1 ? 's' : ''} live`
       : '<i></i>No sessions running';
+    const t24 = d.tokens_24h || {};
     $('#sideStats').innerHTML = n
       ? `${Math.round(tps).toLocaleString()} tok/s out · ${
           d.running_agents.length} agents<br>${usd(d.burn_rate_hourly)}/hr burn`
-      : `${usd(d.spend_24h)} spent in 24h`;
+      : `${tok(splitTotal(t24))} tokens in 24h · ${tok(t24.output)} out<br>${
+          usd(d.spend_24h)} list-price`;
     drawSideSpark();
 
     const badge = $('#liveBadge');

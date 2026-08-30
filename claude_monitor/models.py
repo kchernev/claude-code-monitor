@@ -69,6 +69,24 @@ def _distill_topic(prompt: str, limit: int = 90) -> str:
     return chosen[:limit].strip()
 
 
+def timeline_split(point: tuple) -> tuple:
+    """``(fresh, resent, cache_read)`` of one timeline point.
+
+    ``fresh`` is input the model read for the first time (the uncached stub
+    plus cache writes that grew the context); ``resent`` is the part of the
+    cache writes that re-sent context it had already read. Points written
+    before v12 carry only the context total; for those the whole input
+    counts as fresh so every total still adds up — the split is simply
+    unknown, not zero.
+    """
+    if len(point) >= 9:
+        stub, read, write, resent = point[5], point[6], point[7], point[8]
+        return stub + write - resent, resent, read
+    if len(point) == 8:
+        return point[5] + point[7], 0, point[6]
+    return point[2], 0, 0
+
+
 @dataclass
 class Usage:
     """Accumulated token usage, split by cache tier so cost stays exact."""
@@ -80,6 +98,14 @@ class Usage:
     cache_read: int = 0
     web_search_requests: int = 0
     web_fetch_requests: int = 0
+    # The part of the cache writes that re-sent context the model had already
+    # read — the cache lapsed during an idle gap, or an earlier part of the
+    # prompt changed, so it was written again at full price. Classified per
+    # call by the parser from the context size of the previous call; the API
+    # itself does not distinguish it from genuinely new content.
+    resent: int = 0
+    # Calls on which that happened (resent above a noise floor).
+    cache_misses: int = 0
 
     def add(self, other: "Usage") -> None:
         self.input_tokens += other.input_tokens
@@ -89,6 +115,23 @@ class Usage:
         self.cache_read += other.cache_read
         self.web_search_requests += other.web_search_requests
         self.web_fetch_requests += other.web_fetch_requests
+        self.resent += other.resent
+        self.cache_misses += other.cache_misses
+
+    @property
+    def cache_write(self) -> int:
+        return self.cache_write_5m + self.cache_write_1h
+
+    @property
+    def fresh_input(self) -> int:
+        """Input the model read for the first time, at full price."""
+        return self.input_tokens + self.cache_write - self.resent
+
+    @property
+    def reread_multiplier(self) -> float:
+        """How many times, on average, each fresh token was re-read."""
+        fresh = self.fresh_input
+        return self.cache_read / fresh if fresh > 0 else 0.0
 
     @property
     def total_input(self) -> int:
@@ -306,9 +349,11 @@ class Session:
     prompts: List[dict] = field(default_factory=list)
     files_touched: Dict[str, int] = field(default_factory=dict)
 
-    # Rolling series used for velocity, context-pressure and daily-spend
-    # charts. Each entry is
-    # (epoch_seconds, output_tokens, context_tokens, cost, uncached_cost).
+    # Rolling series used for velocity, context-pressure, daily-spend and
+    # token-composition charts. Each entry is
+    # (epoch_seconds, output_tokens, context_tokens, cost, uncached_cost,
+    #  fresh_input, cache_read, cache_write) — read the split with
+    # :func:`timeline_split`, which tolerates the older five-field shape.
     timeline: List[tuple] = field(default_factory=list)
 
     peak_context: int = 0

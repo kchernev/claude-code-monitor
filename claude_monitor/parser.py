@@ -28,8 +28,17 @@ from .models import AgentRun, ApiCall, ModelStat, Session, Usage, _utc
 # with freshly parsed sessions. v9: injected-prefix screening for list-form
 # user records. v10: timeline points carry uncached cost, so daily attribution
 # can be exact per call. v11: transcript-tail activity state (tail +
-# pending_tools), for the live "what is it doing" readout.
-CACHE_VERSION = 11
+# pending_tools), for the live "what is it doing" readout. v12: timeline
+# points carry the input split (fresh / cache read / cache write), so token
+# composition can be charted over time rather than only in totals. v13: the
+# re-sent classification (Usage.resent / cache_misses, timeline field 8).
+CACHE_VERSION = 13
+
+# A cache write counts as a miss when at least this much of it re-sent
+# context the model had already read. Smaller amounts come from a shifted
+# cache breakpoint rather than a lapsed cache, and are still attributed as
+# re-sent tokens — they just don't count as an event.
+MISS_FLOOR = 1024
 
 # Unique-per-record fallback identity. Never reuse ``id(rec)`` here: CPython
 # recycles addresses as records are garbage-collected between iterations, so
@@ -122,6 +131,23 @@ def _apply_assistant(
     fast = raw_usage.get("speed") == "fast"
     ts = _utc(rec.get("timestamp"))
 
+    # Split this call's cache writes into new content and re-sent context.
+    # The cacheable prompt is everything read from or written to the cache;
+    # on a full hit the write is exactly how much that grew since the
+    # previous call, and anything written beyond the growth is context the
+    # model had already read — written again because the cache lapsed or an
+    # earlier prefix changed. The uncached stub is left out of the
+    # comparison: it changes size call to call and is never cached. A prompt
+    # that shrank by more than 30% is a compaction or a fresh start, so the
+    # comparison restarts there.
+    cached = usage.cache_write + usage.cache_read
+    prev_cached = getattr(sink, "_prev_cached", None)
+    if prev_cached is not None and cached >= prev_cached * 0.7:
+        usage.resent = max(0, usage.cache_write - max(0, cached - prev_cached))
+        if usage.resent >= MISS_FLOOR:
+            usage.cache_misses = 1
+    sink._prev_cached = cached
+
     tools: List[str] = []
     content = msg.get("content")
     if isinstance(content, list):
@@ -168,7 +194,9 @@ def _apply_assistant(
     if timeline is not None and ts is not None:
         timeline.append(
             (ts.timestamp(), usage.output_tokens, usage.total_input,
-             call.cost, uncached)
+             call.cost, uncached,
+             usage.input_tokens, usage.cache_read, usage.cache_write,
+             usage.resent)
         )
     return call
 
@@ -626,6 +654,8 @@ def _usage_to_dict(u: Usage) -> dict:
         "r": u.cache_read,
         "ws": u.web_search_requests,
         "wf": u.web_fetch_requests,
+        "rs": u.resent,
+        "cm": u.cache_misses,
     }
 
 
@@ -638,6 +668,8 @@ def _usage_from_dict(d: dict) -> Usage:
         cache_read=d.get("r", 0),
         web_search_requests=d.get("ws", 0),
         web_fetch_requests=d.get("wf", 0),
+        resent=d.get("rs", 0),
+        cache_misses=d.get("cm", 0),
     )
 
 

@@ -3,8 +3,9 @@
 # Claude Code Monitor
 
 **Observability for Claude Code** — live sessions, subagents, workflow fan-outs,
-token velocity and exact API cost, read straight from the transcripts
-Claude Code already writes to `~/.claude/projects/`.
+token composition (fresh · re-sent · cache read · output), token
+velocity and exact API cost, read straight from the transcripts Claude Code
+already writes to `~/.claude/projects/`.
 
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -61,6 +62,17 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
 
 ## What it measures
 
+- **Tokens, by kind** — every call is split into *fresh* input (read for the
+  first time), *re-sent* input, cache reads and output, and the split is kept
+  per call, so the dashboard can show where tokens go over time — per day,
+  per hour, per call — not only in totals. This is not the API's own split:
+  Claude Code caches the whole prompt, so the API's `input_tokens` is a
+  ~100-token stub and everything new lands in "cache write" together with
+  context written *again* after the cache lapsed. The parser separates those
+  two by comparing each call's cacheable prompt with the previous call's; the
+  re-sent share, the cache-miss count and the re-read multiplier (how many
+  times each fresh token is re-read) are the headline insights. Cache reads
+  dominate, so the stacked charts can hide them or normalise to share.
 - **Cost** — per-call attribution against list prices, cache reads at 0.1× input
   and writes at 1.25× (5m TTL) or 2× (1h TTL). A session that switches models is
   split by the actual model per call, never apportioned — tiers differ by 10×.
@@ -92,10 +104,10 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
 
 | Page | What's there |
 | --- | --- |
-| **Overview** | Live sessions with CPU/RSS, daily spend, cost composition, weekday×hour heatmap, project and model splits |
+| **Overview** | Token tiles (fresh · re-sent · cache read · output), a composition ring with the re-read multiplier and cache-miss count, stacked tokens per day, live sessions, project and model splits; spend folded away underneath |
 | **Projects** | One card per project; each project's home hub links to its scoped Sessions, Agents, Workflows, Git, Cost and Tools |
 | **Sessions** | Every session, searchable across titles *and prompt text* |
-| **Session** | Context growth, cumulative spend, cost composition, tools, per-model split, subagent table, your prompts (exportable as JSON or a standalone HTML page), files touched |
+| **Session** | Token composition, tokens per call and per hour by kind, context growth, subagent table, your prompts (exportable as JSON or a standalone HTML page), files touched; cost composition and cumulative spend folded away |
 | **Agents** | Log-scale cost distribution with percentiles, breakdown by type, sortable run table |
 | **Agent** | The exact prompt it was given, what it returned, tools used, cost |
 | **Workflows** | Gantt view of each fan-out — one bar per agent, so parallelism is visible |

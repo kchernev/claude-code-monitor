@@ -282,7 +282,7 @@ a.btn.xs,button.btn.xs{padding:4px 10px;font-size:11.5px;border-radius:8px}
 
 /* live-activity readout: what a live session is doing right now */
 .actline{display:flex;align-items:center;gap:6px;margin-top:3px;font-size:11.5px;
-         font-weight:600;color:var(--green);max-width:420px;overflow:hidden;
+         font-weight:600;color:var(--green);max-width:340px;overflow:hidden;
          white-space:nowrap}
 .actline i{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none;
            animation:pulse 1.9s ease-in-out infinite}
@@ -363,12 +363,13 @@ td{padding:11px 14px;border-bottom:1px solid var(--panel2);vertical-align:middle
    white-space:nowrap}
 tr:last-child td{border-bottom:0}
 td.n,th.n{text-align:right;font-family:var(--mono);font-size:12px;
-          font-variant-numeric:tabular-nums}
+          font-variant-numeric:tabular-nums;padding-left:10px;padding-right:10px}
 td.grow{white-space:normal;min-width:240px;max-width:520px}
 td.id{font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
 td b{font-weight:700}
-td .tp{display:block;color:var(--ink3);font-size:11.5px;margin-top:1px;max-width:420px;
+td .tp{display:block;color:var(--ink3);font-size:11.5px;margin-top:1px;max-width:340px;
        overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+td .tp .sid{font-family:var(--mono);font-size:10.5px;color:var(--ink3);opacity:.85}
 td.dim{color:var(--ink3)}
 td.cost{font-weight:800;font-family:var(--mono);font-size:12.5px}
 tbody tr{cursor:pointer;position:relative;transition:background .1s}
@@ -478,11 +479,13 @@ button.brow:hover .lab{color:var(--vio-text);text-decoration:underline;
        margin-top:7px;font-family:var(--mono);font-size:.62rem;color:var(--ink3)}
 .gaxis .ticks{display:flex;justify-content:space-between}
 
-/* overview hero — 2×2 grid so card seams align on both axes */
-.hero{display:grid;grid-template-columns:minmax(280px,330px) 1fr;gap:16px}
+/* overview hero — the flow card takes the wide column, the four token stats
+   stack beside it as compact rows (they used to stretch to the row height) */
+.hero{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(320px,1fr);gap:16px;
+      align-items:stretch}
 .hero>*{min-width:0}
-.hero .kpi{display:flex;flex-direction:column;align-items:flex-start}
-.hero .kpi .delta{margin-top:auto}
+.hero .illus{display:flex;flex-direction:column}
+.hero .illus .flow{flex:1}
 .hwave{grid-column:1/-1}
 
 /* alerts (overview, shown only when actionable) */
@@ -496,6 +499,60 @@ button.brow:hover .lab{color:var(--vio-text);text-decoration:underline;
        background:linear-gradient(160deg,color-mix(in srgb,var(--vio) 9%,var(--card)),var(--card))}
 .illus .cap{font-size:13px;font-weight:700;margin-bottom:3px}
 .illus .sub2{font-size:12px;color:var(--ink3);line-height:1.5}
+
+/* token-flow card: ribbons into the model, particles travelling along them */
+.flow .fhead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.flow .fsum{text-align:right;flex:none}
+.flow .fsum b{display:block;font-family:var(--mono);font-size:18px;font-weight:800;
+              letter-spacing:-.02em;line-height:1.1}
+.flow .flowpick{margin-top:8px;flex-wrap:wrap}
+.flow .fsum span{font-family:var(--mono);font-size:9.5px;color:var(--ink3);letter-spacing:.14em;
+                 text-transform:uppercase}
+.flow svg{display:block;margin:8px 0 2px;overflow:visible}
+.flow .band{fill:none;stroke-linecap:butt;opacity:.38}
+.flow .dot{stroke:var(--card);stroke-width:1.5}
+.flow .node{stroke:var(--vio);stroke-width:2}
+.flow .fh{font-family:var(--mono);font-size:9px;fill:var(--ink3);letter-spacing:.16em}
+.flow .nl{font-family:var(--mono);font-size:8.5px;fill:var(--ink3);letter-spacing:.14em;
+          text-transform:uppercase}
+.flow .nv{font-family:var(--sans);font-size:12.5px;font-weight:800;fill:var(--ink)}
+.flow .fl{font-family:var(--sans);font-size:12px;font-weight:700;fill:var(--ink)}
+.flow .fv{font-family:var(--mono);font-size:11px;font-weight:700;fill:var(--ink2)}
+.flow .fs{font-weight:400;fill:var(--ink3);font-size:9.5px}
+.flow .rates{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;
+             margin-top:10px;padding-top:10px;
+             border-top:1px solid color-mix(in srgb,var(--vio) 18%,var(--line))}
+.flow .rc{min-width:0}
+.flow .rc .rl{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;
+              color:var(--ink2);white-space:nowrap}
+.flow .rc .sw{width:9px;height:9px;border-radius:3px;flex:none}
+.flow .rc b{display:block;font-family:var(--mono);font-size:13.5px;font-weight:800;
+            margin-top:2px;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.flow .rc b small{font-size:9.5px;font-weight:400;color:var(--ink3);margin-left:1px}
+.flow .rc .rn{display:block;font-size:10.5px;color:var(--ink3);line-height:1.35;margin-top:1px}
+.flow .rc .rm{display:block;font-family:var(--mono);font-size:11px;font-weight:700;
+              color:var(--ink2);margin-top:4px;font-variant-numeric:tabular-nums}
+/* money: what the scope would cost on the API, with and without caching */
+.flow .spend{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;
+             margin-top:10px;padding:10px 12px;border-radius:12px;
+             background:color-mix(in srgb,var(--vio) 7%,var(--card))}
+.flow .spend b{display:block;font-family:var(--mono);font-size:17px;font-weight:800;
+               letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.flow .spend b.good{color:var(--green)}
+.flow .spend span{display:block;font-size:10.5px;color:var(--ink3);line-height:1.35;margin-top:2px}
+
+/* compact stat rows beside the flow card */
+.kpis.krows{grid-template-columns:1fr;grid-auto-rows:1fr;gap:12px;margin-bottom:0}
+.kpi.krow{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:12px;
+          align-items:center;min-height:0;padding:12px 14px}
+.kpi.krow .ic{width:30px;height:30px;margin:0;border-radius:9px}
+.kpi.krow .ic .kdot{width:11px;height:11px}
+.kpi.krow .k{font-size:12px}
+.kpi.krow .delta{margin-top:4px;font-size:10.5px;padding:2px 8px;white-space:nowrap;
+                 max-width:100%;overflow:hidden;text-overflow:ellipsis;display:inline-block}
+.kpi.krow .v{font-size:19px;margin:0;text-align:right}
+.kpi.krow .spk{position:static;line-height:0}
+@media(max-width:1180px){.kpi.krow .spk{display:none}}
 
 /* ══ FEEDBACK ═══════════════════════════════════════════════════════ */
 #nprog{position:fixed;top:0;left:0;height:2.5px;width:0;z-index:200;
@@ -733,3 +790,40 @@ section.blk{margin-top:16px}
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important;animation:none!important}
 }
+
+/* ══ TOKEN COMPOSITION ═════════════════════════════════════════════ */
+/* Four kinds — fresh input, cache write, cache read, output — with one
+   palette slot each (--s1..--s4, CVD-validated in both themes). The green
+   and gold slots sit under 3:1 against the light surface, which is why every
+   token chart ships with a value legend or a table twin beside it. */
+.kdot{display:block;width:12px;height:12px;border-radius:4px}
+.kpi.kind .v{letter-spacing:-.02em}
+.kpi .k.sub2{margin-top:6px;font-weight:400}
+.tokbar{display:flex;gap:2px;height:6px;border-radius:99px;overflow:hidden;
+        background:var(--panel2);margin-top:5px;min-width:72px}
+.tokbar i{display:block;height:100%;min-width:2px}
+.tokbar.wide{height:8px;margin:9px 0 7px;width:100%}
+td .tokbar{width:64px;margin-left:auto}
+.note{font-size:11.5px;line-height:1.5;margin:10px 0 0}
+.note b{color:var(--ink2)}
+/* the three derived numbers under the ring — the "why" of the composition */
+.insights{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;
+          margin-top:4px;padding-top:10px;
+          border-top:1px solid color-mix(in srgb,var(--vio) 18%,var(--line))}
+.insights b{display:block;font-family:var(--mono);font-size:15px;font-weight:800;
+            letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.insights span{display:block;font-size:11px;color:var(--ink3);line-height:1.4;
+               margin-top:2px}
+.costline{font-family:var(--mono);font-size:11.5px;color:var(--ink3);
+          font-variant-numeric:tabular-nums}
+.illus .costline{margin-top:10px;padding-top:10px;border-top:1px solid
+                 color-mix(in srgb,var(--vio) 18%,var(--line))}
+.hd p.sub.costline{margin-top:5px}
+.chart .stk{transition:opacity .1s}
+/* per-card view mode for the stacked token charts (shared across the app) */
+.tmode{display:inline-flex;background:var(--panel2);border-radius:9px;padding:2px;gap:1px}
+.tmode button{border:0;background:none;font-family:var(--sans);font-size:11px;
+              font-weight:600;color:var(--ink3);padding:3px 9px;border-radius:7px;
+              cursor:pointer;transition:.12s;white-space:nowrap}
+.tmode button:hover{color:var(--ink)}
+.tmode button.on{background:var(--card);color:var(--ink);box-shadow:var(--sh)}

@@ -19,7 +19,7 @@ from flask import Flask, jsonify, request
 from . import export
 from .. import analytics, pricing
 from ..gitmon import GitMonitor
-from ..models import AgentRun, Session, _distill_topic
+from ..models import AgentRun, Session, _distill_topic, timeline_split
 from ..parser import Corpus, iter_records, tool_call_text
 from ..resources import ResourceMonitor, system_snapshot
 
@@ -376,6 +376,36 @@ def usage_json(u) -> dict:
         "total_input": u.total_input,
         "total": u.total,
         "cache_hit_rate": u.cache_hit_rate,
+        "fresh": u.fresh_input,
+        "resent": u.resent,
+        "cache_misses": u.cache_misses,
+    }
+
+
+def split_json(u) -> dict:
+    """The four-way token composition every token view draws.
+
+    ``fresh`` is what the model read for the first time; ``resent`` the part
+    of the cache writes that re-sent context it had already read; the two
+    together are everything billed at the full input rate or above.
+    """
+    return {
+        "fresh": u.fresh_input,
+        "resent": u.resent,
+        "cache_read": u.cache_read,
+        "output": u.output_tokens,
+    }
+
+
+def insight_json(u) -> dict:
+    """The derived numbers that explain the composition."""
+    full_price = u.fresh_input + u.resent
+    return {
+        # How many times each fresh token was re-read from cache, on average.
+        "reread_x": u.reread_multiplier,
+        # Share of full-price input that was a re-send rather than new work.
+        "resent_share": (u.resent / full_price) if full_price else 0.0,
+        "cache_misses": u.cache_misses,
     }
 
 
@@ -406,6 +436,8 @@ def session_brief(s: Session) -> dict:
         ),
         "tokens": u.total,
         "output_tokens": u.output_tokens,
+        "split": split_json(u),
+        "insights": insight_json(u),
         "peak_context": s.peak_context,
         "current_context": s.timeline[-1][2] if s.timeline else 0,
         "cost": s.total_cost,
@@ -444,6 +476,8 @@ def agent_json(a: AgentRun, *, parent_live: bool = False, project: str = "") -> 
         "api_calls": a.api_calls,
         "tokens": a.usage.total,
         "output_tokens": a.usage.output_tokens,
+        "split": split_json(a.usage),
+        "insights": insight_json(a.usage),
         "cost": a.cost,
         "cache_hit_rate": a.usage.cache_hit_rate,
         "output_tps": a.output_tps,
@@ -451,6 +485,18 @@ def agent_json(a: AgentRun, *, parent_live: bool = False, project: str = "") -> 
         "tool_errors": a.tool_errors,
         "state": a.state(parent_live=parent_live),
         "completed": a.completed,
+    }
+
+
+def cost_by_type(model: str, u) -> dict:
+    """USD by API token type for one model's usage, at that model's rates."""
+    r = pricing.rate_for(model)
+    return {
+        "input": u.input_tokens * r.input / 1e6,
+        "cache_write_5m": u.cache_write_5m * r.input * pricing.CACHE_WRITE_5M_MULT / 1e6,
+        "cache_write_1h": u.cache_write_1h * r.input * pricing.CACHE_WRITE_1H_MULT / 1e6,
+        "cache_read": u.cache_read * r.input * pricing.CACHE_READ_MULT / 1e6,
+        "output": u.output_tokens * r.output / 1e6,
     }
 
 
@@ -464,6 +510,8 @@ def bucket_json(b) -> dict:
         "tokens": b.usage.total,
         "output_tokens": b.usage.output_tokens,
         "input_tokens": b.usage.total_input,
+        "split": split_json(b.usage),
+        "cache_misses": b.usage.cache_misses,
         "cache_hit_rate": b.usage.cache_hit_rate,
         "cost": b.cost,
         "uncached_cost": b.uncached_cost,
@@ -569,20 +617,26 @@ def create_app(claude_dir: Optional[Path] = None, *,
                 "cost": b.cost,
                 "uncached": b.uncached_cost,
                 "tokens": b.usage.total,
+                # Composition, so the daily chart can stack by kind.
+                **split_json(b.usage),
                 "sessions": b.sessions,
                 "agents": b.agents,
             }
             for d, b in analytics.by_day(sessions, days=days)
         ]
 
-        # Activity heatmap: spend by weekday x hour, from API-call timestamps.
-        heat: Dict[tuple, float] = defaultdict(float)
+        # Activity heatmap: tokens and spend by weekday x hour, from API-call
+        # timestamps.
+        heat: Dict[tuple, list] = defaultdict(lambda: [0.0, 0])
         for s in sessions:
-            for ts, _out, _ctx, cost, _unc in s.timeline:
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
-                heat[(dt.weekday(), dt.hour)] += cost
+            for p in s.timeline:
+                dt = datetime.fromtimestamp(p[0], tz=timezone.utc).astimezone()
+                cell = heat[(dt.weekday(), dt.hour)]
+                cell[0] += p[3]
+                cell[1] += p[2] + p[1]
         heatmap = [
-            {"day": d, "hour": h, "cost": v} for (d, h), v in sorted(heat.items())
+            {"day": d, "hour": h, "cost": v[0], "tokens": v[1]}
+            for (d, h), v in sorted(heat.items())
         ]
 
         peak_par = max(
@@ -598,6 +652,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
                 "api_calls": tot.api_calls,
                 "tokens": tot.usage.total,
                 "output_tokens": tot.usage.output_tokens,
+                "split": split_json(tot.usage),
                 "cost": tot.cost,
                 "uncached_cost": tot.uncached_cost,
                 "savings": tot.savings,
@@ -607,10 +662,16 @@ def create_app(claude_dir: Optional[Path] = None, *,
             },
             "economics": econ,
             "cache": cache,
+            "insights": dict(insight_json(tot.usage),
+                             calls_missed_share=(tot.usage.cache_misses / tot.api_calls
+                                                 if tot.api_calls else 0.0)),
             "daily": daily,
             "heatmap": heatmap,
             "projects": [bucket_json(b) for b in analytics.by_project(sessions)],
-            "models": [bucket_json(b) for b in analytics.by_model(sessions)],
+            # Each model also carries its cost by token type, so the flow
+            # card can price one model's streams exactly.
+            "models": [dict(bucket_json(b), cost_by_type=cost_by_type(b.key, b.usage))
+                       for b in analytics.by_model(sessions)],
             "agent_types": [bucket_json(b) for b in analytics.agent_type_summary(sessions)],
             "tools": [
                 {"tool": n, "main": m, "agent": a, "total": m + a}
@@ -625,6 +686,12 @@ def create_app(claude_dir: Optional[Path] = None, *,
                 }
                 for m in {mm for s in sessions for mm in s.per_model}
                 if m
+            },
+            # Cache tiers, as multiples of a model's input rate.
+            "cache_mult": {
+                "write_5m": pricing.CACHE_WRITE_5M_MULT,
+                "write_1h": pricing.CACHE_WRITE_1H_MULT,
+                "read": pricing.CACHE_READ_MULT,
             },
         })
 
@@ -651,6 +718,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
             "burn_rate_hourly": burn,
             "tps_now": tps_now,
             "spend_24h": spend_24h,
+            "tokens_24h": analytics.recent_tokens(sessions, 86400.0),
             "system": system_snapshot(),
             "generation": store.generation,
             "age_s": max(0.0, time.time() - store.last_refresh),
@@ -1271,7 +1339,7 @@ def _spend_curve(s: Session, target: int = 500) -> List[dict]:
     the hourly buckets use. The curve therefore ends at total_cost, matching
     the KPI above it (minus agents that never wrote a timestamp).
     """
-    events: List[tuple] = [(ts, c) for ts, _o, _ctx, c, _u in s.timeline]
+    events: List[tuple] = [(p[0], p[3]) for p in s.timeline]
     for a in s.agents:
         if not a.started or a.cost <= 0:
             continue
@@ -1295,8 +1363,8 @@ def _spend_curve(s: Session, target: int = 500) -> List[dict]:
 
 
 def _hourly_buckets(s: Session) -> List[dict]:
-    """24 one-hour buckets of spend and output tokens, ending at the session's
-    last activity (for a live session that is literally the last 24h).
+    """24 one-hour buckets of spend and tokens by kind, ending at the
+    session's last activity (for a live session that is literally the last 24h).
 
     Main-thread calls are exact; each agent's totals are apportioned uniformly
     across its runtime, since agent transcripts aren't kept as timelines.
@@ -1312,13 +1380,20 @@ def _hourly_buckets(s: Session) -> List[dict]:
         return []
     anchor = int(max(ends) // 3600) * 3600
     start = anchor - 23 * 3600
-    buckets = [{"t": start + i * 3600, "cost": 0.0, "out": 0} for i in range(24)]
+    buckets = [{"t": start + i * 3600, "cost": 0.0, "out": 0,
+                "fresh": 0, "resent": 0, "cache_read": 0}
+               for i in range(24)]
 
-    for ts, out, _ctx, cost, _unc in s.timeline:
-        i = int((ts - start) // 3600)
+    for p in s.timeline:
+        i = int((p[0] - start) // 3600)
         if 0 <= i < 24:
-            buckets[i]["cost"] += cost
-            buckets[i]["out"] += out
+            fresh, resent, cread = timeline_split(p)
+            b = buckets[i]
+            b["cost"] += p[3]
+            b["out"] += p[1]
+            b["fresh"] += fresh
+            b["resent"] += resent
+            b["cache_read"] += cread
 
     for a in s.agents:
         if not a.started:
@@ -1334,8 +1409,12 @@ def _hourly_buckets(s: Session) -> List[dict]:
                 ov = min(hi, t1) - max(lo, t0)
             if ov > 0:
                 frac = ov / span
+                u = a.usage
                 b["cost"] += a.cost * frac
-                b["out"] += int(a.usage.output_tokens * frac)
+                b["out"] += int(u.output_tokens * frac)
+                b["fresh"] += int(u.fresh_input * frac)
+                b["resent"] += int(u.resent * frac)
+                b["cache_read"] += int(u.cache_read * frac)
 
     for b in buckets:
         b["cost"] = round(b["cost"], 6)
@@ -1346,27 +1425,31 @@ def _downsample(timeline: List[tuple], target: int) -> List[dict]:
     """Reduce a per-call timeline to at most ``target`` points.
 
     Buckets are aggregated rather than sampled, so totals and peaks survive:
-    cost and output are summed, context takes the bucket maximum.
+    cost and every token kind are summed, context takes the bucket maximum.
     """
     if not timeline:
         return []
-    if len(timeline) <= target:
-        return [
-            {"t": ts, "out": out, "ctx": ctx, "cost": cost}
-            for ts, out, ctx, cost, _unc in timeline
-        ]
-    step = len(timeline) / target
-    out: List[dict] = []
-    for i in range(target):
-        chunk = timeline[int(i * step): max(int((i + 1) * step), int(i * step) + 1)]
-        if not chunk:
-            continue
-        out.append({
+
+    def point(chunk: List[tuple]) -> dict:
+        splits = [timeline_split(c) for c in chunk]
+        return {
             "t": chunk[0][0],
             "out": sum(c[1] for c in chunk),
             "ctx": max(c[2] for c in chunk),
             "cost": sum(c[3] for c in chunk),
-        })
+            "fresh": sum(sp[0] for sp in splits),
+            "resent": sum(sp[1] for sp in splits),
+            "cache_read": sum(sp[2] for sp in splits),
+        }
+
+    if len(timeline) <= target:
+        return [point([p]) for p in timeline]
+    step = len(timeline) / target
+    out: List[dict] = []
+    for i in range(target):
+        chunk = timeline[int(i * step): max(int((i + 1) * step), int(i * step) + 1)]
+        if chunk:
+            out.append(point(chunk))
     return out
 
 

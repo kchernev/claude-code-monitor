@@ -8,7 +8,7 @@ from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from . import pricing
-from .models import AgentRun, ModelStat, Session, Usage
+from .models import AgentRun, ModelStat, Session, Usage, timeline_split
 
 
 @dataclass
@@ -118,15 +118,33 @@ def by_day(sessions: Iterable[Session], days: int = 30) -> List[Tuple[date, Buck
             b = out[d] = Bucket(key=d.isoformat())
         return b
 
+    def add_usage(u: Usage, src: Usage, frac: float = 1.0) -> None:
+        u.input_tokens += int(src.input_tokens * frac)
+        u.cache_read += int(src.cache_read * frac)
+        u.cache_write_5m += int(src.cache_write_5m * frac)
+        u.cache_write_1h += int(src.cache_write_1h * frac)
+        u.output_tokens += int(src.output_tokens * frac)
+        u.resent += int(src.resent * frac)
+        u.cache_misses += int(round(src.cache_misses * frac))
+
     for s in sessions:
-        for ts, out_tok, ctx, cost, uncached in s.timeline:
+        for p in s.timeline:
+            ts, out_tok, cost, uncached = p[0], p[1], p[3], p[4]
+            fresh, resent, cread = timeline_split(p)
             d = datetime.fromtimestamp(ts, tz=timezone.utc).date()
             b = bucket(d)
             b.cost += cost
             b.uncached_cost += uncached
             b.api_calls += 1
-            b.usage.input_tokens += ctx
+            # The daily series only needs the composition, so the stub and
+            # both write tiers land as one "written" amount; fresh_input on
+            # the bucket then reads back exactly what the split said.
+            b.usage.cache_write_5m += fresh + resent
+            b.usage.resent += resent
+            b.usage.cache_read += cread
             b.usage.output_tokens += out_tok
+            if resent >= 1024:
+                b.usage.cache_misses += 1
             active[d].add(s.session_id)
 
         for a in s.agents:
@@ -141,8 +159,7 @@ def by_day(sessions: Iterable[Session], days: int = 30) -> List[Tuple[date, Buck
             if span <= 0:
                 b0.cost += a.cost
                 b0.uncached_cost += a.uncached_cost
-                b0.usage.input_tokens += a.usage.total_input
-                b0.usage.output_tokens += a.usage.output_tokens
+                add_usage(b0.usage, a.usage)
                 active[t0.date()].add(s.session_id)
                 continue
             d = t0.date()
@@ -155,8 +172,7 @@ def by_day(sessions: Iterable[Session], days: int = 30) -> List[Tuple[date, Buck
                     b = bucket(d)
                     b.cost += a.cost * frac
                     b.uncached_cost += a.uncached_cost * frac
-                    b.usage.input_tokens += int(a.usage.total_input * frac)
-                    b.usage.output_tokens += int(a.usage.output_tokens * frac)
+                    add_usage(b.usage, a.usage, frac)
                     active[d].add(s.session_id)
                 d += timedelta(days=1)
 
@@ -367,7 +383,10 @@ def cache_efficiency(sessions: Iterable[Session]) -> dict:
         "cache_read": u.cache_read,
         "cache_write_5m": u.cache_write_5m,
         "cache_write_1h": u.cache_write_1h,
-        "fresh_input": u.input_tokens,
+        "fresh_input": u.fresh_input,
+        "resent": u.resent,
+        "cache_misses": u.cache_misses,
+        "reread_multiplier": u.reread_multiplier,
         "total_input": u.total_input,
         "cost": cost,
         "uncached_cost": uncached,
@@ -443,6 +462,21 @@ def token_economics(sessions: Iterable[Session]) -> dict:
     }
 
 
+def _window_fraction(a: AgentRun, lo: float, hi: float) -> float:
+    """Share of an agent's runtime that falls inside ``[lo, hi]``.
+
+    An agent still running is treated as ending at ``hi`` (now). One whose
+    only call gives it no duration at all is either wholly inside the window
+    or wholly outside it — apportioning by overlap would drop it entirely.
+    """
+    t0 = a.started.timestamp()
+    t1 = a.ended.timestamp() if a.ended else hi
+    if t1 <= t0:
+        return 1.0 if lo <= t0 <= hi else 0.0
+    overlap = min(hi, t1) - max(lo, t0)
+    return overlap / (t1 - t0) if overlap > 0 else 0.0
+
+
 def recent_rates(
     sessions: Iterable[Session], window_s: float = 900.0
 ) -> Tuple[float, float]:
@@ -458,23 +492,59 @@ def recent_rates(
     lo = now - window_s
     cost = out = 0.0
     for s in sessions:
-        for ts, o, _ctx, c, _unc in reversed(s.timeline):
-            if ts < lo:
+        for p in reversed(s.timeline):
+            if p[0] < lo:
                 break
-            cost += c
-            out += o
+            cost += p[3]
+            out += p[1]
         for a in s.agents:
             if not a.started:
                 continue
-            t0 = a.started.timestamp()
-            t1 = a.ended.timestamp() if a.ended else now
-            overlap = min(now, t1) - max(lo, t0)
-            if overlap <= 0:
+            frac = _window_fraction(a, lo, now)
+            if frac <= 0:
                 continue
-            frac = overlap / max(1.0, t1 - t0)
             cost += a.cost * frac
             out += a.usage.output_tokens * frac
     return cost / window_s * 3600.0, out / window_s
+
+
+def recent_tokens(
+    sessions: Iterable[Session], window_s: float = 86400.0
+) -> Dict[str, int]:
+    """Tokens by kind inside the trailing window ending *now*.
+
+    ``{"fresh", "resent", "cache_read", "output"}`` — the four buckets the
+    token views draw. Main-thread calls are exact from the timeline; agents
+    are apportioned by runtime overlap, the same convention as
+    :func:`recent_rates`.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    lo = now - window_s
+    fresh = resent = cread = out = 0.0
+    for s in sessions:
+        for p in reversed(s.timeline):
+            if p[0] < lo:
+                break
+            f, rs, r = timeline_split(p)
+            fresh += f
+            resent += rs
+            cread += r
+            out += p[1]
+        for a in s.agents:
+            if not a.started:
+                continue
+            frac = _window_fraction(a, lo, now)
+            if frac <= 0:
+                continue
+            u = a.usage
+            fresh += u.fresh_input * frac
+            resent += u.resent * frac
+            cread += u.cache_read * frac
+            out += u.output_tokens * frac
+    return {
+        "fresh": int(fresh), "resent": int(resent),
+        "cache_read": int(cread), "output": int(out),
+    }
 
 
 def window_usage(
@@ -523,10 +593,10 @@ def window_usage(
     for s in sessions:
         main_cost = 0.0
         main_tokens = 0.0
-        for ts, out, ctx, cost, _unc in s.timeline:
-            if lo <= ts <= hi:
-                main_cost += cost
-                main_tokens += ctx + out
+        for p in s.timeline:
+            if lo <= p[0] <= hi:
+                main_cost += p[3]
+                main_tokens += p[2] + p[1]
         if main_cost or main_tokens:
             bump(projects, s.project, main_cost, main_tokens)
             split_models(s.per_model, main_cost, main_tokens)
@@ -571,23 +641,23 @@ def velocity_series(sess: Session, bucket_s: float = 30.0) -> List[Tuple[float, 
     if len(sess.timeline) < 2:
         return []
     buckets: Dict[int, float] = defaultdict(float)
-    for ts, out_tokens, _ctx, _cost, _unc in sess.timeline:
-        buckets[int(ts // bucket_s)] += out_tokens
+    for p in sess.timeline:
+        buckets[int(p[0] // bucket_s)] += p[1]
     return [(k * bucket_s, v / bucket_s) for k, v in sorted(buckets.items())]
 
 
 def context_series(sess: Session) -> List[Tuple[float, int]]:
     """Context size per API call: ``[(epoch, context_tokens), ...]``."""
-    return [(ts, ctx) for ts, _out, ctx, _cost, _unc in sess.timeline]
+    return [(p[0], p[2]) for p in sess.timeline]
 
 
 def cost_series(sess: Session) -> List[Tuple[float, float]]:
     """Cumulative spend over the session: ``[(epoch, usd_so_far), ...]``."""
     running = 0.0
     out = []
-    for ts, _o, _c, cost, _unc in sess.timeline:
-        running += cost
-        out.append((ts, running))
+    for p in sess.timeline:
+        running += p[3]
+        out.append((p[0], running))
     return out
 
 
