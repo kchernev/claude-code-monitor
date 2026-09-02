@@ -32,7 +32,11 @@ from .models import AgentRun, ApiCall, ModelStat, Session, Usage, _utc
 # points carry the input split (fresh / cache read / cache write), so token
 # composition can be charted over time rather than only in totals. v13: the
 # re-sent classification (Usage.resent / cache_misses, timeline field 8).
-CACHE_VERSION = 13
+# v14: agents carry their own tail / pending_tools / recent, so the Agents
+# floor can show what a subagent is doing without re-reading its transcript.
+# v15: agents carry a per-call timeline so the floor can chart token flow
+# over the run, not only totals.
+CACHE_VERSION = 15
 
 # A cache write counts as a miss when at least this much of it re-sent
 # context the model had already read. Smaller amounts come from a shifted
@@ -309,6 +313,105 @@ def _prompt_text(rec: dict) -> str:
     return ""
 
 
+def _assistant_text(rec: dict, limit: int = 240) -> str:
+    """First text block of an assistant record, for the live trace."""
+    content = (rec.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return ""
+    for b in content:
+        if isinstance(b, dict) and b.get("type") == "text":
+            return (b.get("text") or "").strip()[:limit]
+    return ""
+
+
+def _record_tool_use(block: dict, ts: Optional[datetime],
+                     open_tools: dict) -> None:
+    """Remember one in-flight tool_use, keyed by its block id."""
+    name = block.get("name") or "?"
+    primary, sub = tool_call_text(name, block.get("input"))
+    open_tools[block.get("id") or ""] = {
+        "name": name,
+        "text": primary[:200],
+        "sub": sub[:120],
+        "ts": ts.timestamp() if ts else None,
+    }
+
+
+def _assistant_tail(rec: dict, ts: Optional[datetime], stop_reason,
+                    open_tools: dict) -> dict:
+    """Update ``open_tools`` from this assistant record and return the tail."""
+    tail = {"kind": "assistant", "stop": stop_reason,
+            "ts": ts.timestamp() if ts else None}
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                _record_tool_use(block, ts, open_tools)
+    return tail
+
+
+def _user_tail(rec: dict, ts: Optional[datetime],
+               open_tools: dict) -> tuple:
+    """Classify a user record for the activity tail.
+
+    Returns ``(tail, closed)`` where ``closed`` is the tool dicts this record
+    resolved, each annotated with ``error`` and ``closed_ts``. Mutates
+    ``open_tools``.
+    """
+    content = (rec.get("message") or {}).get("content")
+    interrupted = False
+    had_result = False
+    closed: List[dict] = []
+    if isinstance(content, str):
+        interrupted = content.lstrip().startswith(_INTERRUPT_MARK)
+    elif isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                had_result = True
+                done = open_tools.pop(block.get("tool_use_id") or "", None)
+                if done is not None:
+                    item = dict(done)
+                    item["error"] = bool(block.get("is_error"))
+                    item["closed_ts"] = ts.timestamp() if ts else None
+                    closed.append(item)
+                if _result_head(block).lstrip().startswith(_INTERRUPT_MARK):
+                    interrupted = True
+            elif block.get("type") == "text" and (
+                    block.get("text") or "").lstrip().startswith(
+                        _INTERRUPT_MARK):
+                interrupted = True
+    stamp = ts.timestamp() if ts else None
+    if interrupted:
+        open_tools.clear()
+        return {"kind": "interrupt", "ts": stamp}, closed
+    if had_result:
+        tail: dict = {"kind": "result", "ts": stamp}
+        if closed:
+            last = closed[-1]
+            tail["tool"] = {k: last[k] for k in ("name", "text", "sub", "ts")}
+        return tail, closed
+    return {"kind": "prompt", "ts": stamp}, closed
+
+
+def _pending_list(open_tools: dict) -> List[dict]:
+    """Newest few unresolved tool calls — the activity readout's in-flight set."""
+    return sorted(
+        open_tools.values(), key=lambda t: t.get("ts") or 0
+    )[-3:]
+
+
+_RECENT_KEEP = 32
+
+
+def _push_recent(recent: List[dict], event: dict) -> None:
+    recent.append(event)
+    extra = len(recent) - _RECENT_KEEP
+    if extra > 0:
+        del recent[:extra]
+
+
 # ---------------------------------------------------------------------------
 # Subagent transcripts
 # ---------------------------------------------------------------------------
@@ -369,6 +472,11 @@ def parse_agent_file(
     if path.parent.name.startswith("wf_"):
         run.workflow_id = path.parent.name
 
+    open_tools: Dict[str, dict] = {}
+    tail: dict = {}
+    recent: List[dict] = []
+    timeline: List[tuple] = []
+
     for rec, _ in iter_records(path):
         rtype = rec.get("type")
         ts = _utc(rec.get("timestamp"))
@@ -379,15 +487,22 @@ def parse_agent_file(
                 run.ended = ts
 
         if rtype == "assistant":
-            call = _apply_assistant(rec, run, seen=seen)
-            if call and call.stop_reason == "end_turn":
-                run.completed = True
-                msg = rec.get("message") or {}
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for block in content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            run.final_message = (block.get("text") or "")[:2000]
+            call = _apply_assistant(rec, run, timeline, seen=seen)
+            if call:
+                tail = _assistant_tail(rec, ts, call.stop_reason, open_tools)
+                if call.stop_reason == "end_turn":
+                    run.completed = True
+                    text = _assistant_text(rec, 2000)
+                    if text:
+                        run.final_message = text
+                elif not call.tools:
+                    snippet = _assistant_text(rec)
+                    if snippet:
+                        _push_recent(recent, {
+                            "kind": "text",
+                            "text": snippet,
+                            "ts": ts.timestamp() if ts else None,
+                        })
         elif rtype == "user":
             if seen is not None:
                 ukey = ("u", rec.get("uuid"))
@@ -396,6 +511,16 @@ def parse_agent_file(
                 if rec.get("uuid"):
                     seen.add(ukey)
             run.tool_errors += _count_tool_errors(rec)
+            tail, closed = _user_tail(rec, ts, open_tools)
+            for t in closed:
+                _push_recent(recent, {
+                    "kind": "tool",
+                    "name": t.get("name") or "?",
+                    "text": t.get("text") or "",
+                    "sub": t.get("sub") or "",
+                    "ts": t.get("closed_ts") or t.get("ts"),
+                    "error": bool(t.get("error")),
+                })
             # The first user record is the orchestrator's prompt to the agent.
             if not run.prompt:
                 msg = rec.get("message") or {}
@@ -403,6 +528,10 @@ def parse_agent_file(
                 if isinstance(content, str):
                     run.prompt = content[:4000]
 
+    run.pending_tools = _pending_list(open_tools)
+    run.tail = tail
+    run.recent = recent
+    run.timeline = timeline
     return run
 
 
@@ -452,26 +581,13 @@ def parse_session_file(path: Path) -> Session:
             call = _apply_assistant(rec, sess, sess.timeline, seen=seen)
             if call:
                 sess.peak_context = max(sess.peak_context, call.context_tokens)
-                tail = {"kind": "assistant", "stop": call.stop_reason,
-                        "ts": ts.timestamp() if ts else None}
-                msg = rec.get("message") or {}
-                content = msg.get("content")
+                tail = _assistant_tail(rec, ts, call.stop_reason, open_tools)
+                content = (rec.get("message") or {}).get("content")
                 if isinstance(content, list):
                     for block in content:
-                        if not (
-                            isinstance(block, dict)
-                            and block.get("type") == "tool_use"
-                        ):
-                            continue
-                        name = block.get("name") or "?"
-                        primary, sub = tool_call_text(name, block.get("input"))
-                        open_tools[block.get("id") or ""] = {
-                            "name": name,
-                            "text": primary[:200],
-                            "sub": sub[:120],
-                            "ts": ts.timestamp() if ts else None,
-                        }
-                        if name == "Agent":
+                        if (isinstance(block, dict)
+                                and block.get("type") == "tool_use"
+                                and (block.get("name") or "") == "Agent"):
                             pending_agent_calls[block.get("id") or ""] = (
                                 block.get("input") or {}
                             )
@@ -486,42 +602,7 @@ def parse_session_file(path: Path) -> Session:
             # Tail classification: results close their pending tool calls; an
             # interrupt kills the whole in-flight turn; anything else is input
             # the model is about to work on.
-            content = (rec.get("message") or {}).get("content")
-            interrupted = False
-            had_result = False
-            closed_tool = None
-            if isinstance(content, str):
-                interrupted = content.lstrip().startswith(_INTERRUPT_MARK)
-            elif isinstance(content, list):
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "tool_result":
-                        had_result = True
-                        done = open_tools.pop(block.get("tool_use_id") or "",
-                                              None)
-                        if done is not None:
-                            closed_tool = done
-                        if _result_head(block).lstrip().startswith(
-                                _INTERRUPT_MARK):
-                            interrupted = True
-                    elif block.get("type") == "text" and (
-                            block.get("text") or "").lstrip().startswith(
-                                _INTERRUPT_MARK):
-                        interrupted = True
-            if interrupted:
-                open_tools.clear()
-                tail = {"kind": "interrupt",
-                        "ts": ts.timestamp() if ts else None}
-            elif had_result:
-                tail = {"kind": "result", "ts": ts.timestamp() if ts else None}
-                if closed_tool:
-                    # Which tool just came back — the CLI flushes a tool_use
-                    # record only together with its result, so this is often
-                    # the freshest "what is it doing" evidence there is.
-                    tail["tool"] = closed_tool
-            else:
-                tail = {"kind": "prompt", "ts": ts.timestamp() if ts else None}
+            tail, _closed = _user_tail(rec, ts, open_tools)
 
             if _is_human_turn(rec):
                 sess.user_turns += 1
@@ -631,9 +712,7 @@ def parse_session_file(path: Path) -> Session:
 
     # Keep only the newest few open calls — the activity readout shows the
     # last one, and a crash can leave arbitrarily many forever-unresolved.
-    sess.pending_tools = sorted(
-        open_tools.values(), key=lambda t: t.get("ts") or 0
-    )[-3:]
+    sess.pending_tools = _pending_list(open_tools)
     sess.tail = tail
 
     sess.timeline.sort(key=lambda p: p[0])
@@ -748,6 +827,10 @@ def session_to_dict(s: Session) -> dict:
                 "completed": a.completed,
                 "label_ambiguous": a.label_ambiguous,
                 "final_message": a.final_message,
+                "tail": a.tail,
+                "pending_tools": a.pending_tools,
+                "recent": a.recent,
+                "timeline": a.timeline,
             }
             for a in s.agents
         ],
@@ -808,6 +891,10 @@ def session_from_dict(d: dict) -> Session:
                 completed=a.get("completed", False),
                 label_ambiguous=a.get("label_ambiguous", False),
                 final_message=a.get("final_message", ""),
+                tail=a.get("tail") or {},
+                pending_tools=a.get("pending_tools") or [],
+                recent=a.get("recent") or [],
+                timeline=[tuple(p) for p in a.get("timeline") or []],
             )
         )
     return s

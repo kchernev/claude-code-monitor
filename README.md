@@ -108,7 +108,7 @@ Common flags: `--days N`, `--project NAME`, `--model NAME`, `--limit N`, `--json
 | **Projects** | One card per project; each project's home hub links to its scoped Sessions, Agents, Workflows, Git, Cost and Tools |
 | **Sessions** | Every session, searchable across titles *and prompt text* |
 | **Session** | Token composition, tokens per call and per hour by kind, context growth, subagent table, your prompts (exportable as JSON or a standalone HTML page), files touched; cost composition and cumulative spend folded away |
-| **Agents** | Log-scale cost distribution with percentiles, breakdown by type, sortable run table |
+| **Agents** | Live floor of active workspaces, each with its running agents; click an agent to watch what it is doing in realtime |
 | **Agent** | The exact prompt it was given, what it returned, tools used, cost |
 | **Workflows** | Gantt view of each fan-out — one bar per agent, so parallelism is visible |
 | **Git** | Live git state of every repo Claude worked in — WIP lines (staged/unstaged/untracked), committed vs uncommitted chart with commit markers, per-repo files & commits |

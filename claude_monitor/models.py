@@ -22,7 +22,18 @@ def _utc(ts: Optional[str]) -> Optional[datetime]:
 
 
 # Lines that mark the actual task in an agent prompt, in priority order.
-_TASK_MARKERS = ("task:", "goal:", "objective:", "mission:", "your job:")
+# Workflow prompts often write ``TASK —`` (em dash) rather than ``TASK:``.
+_TASK_MARKERS = (
+    "task:", "task —", "task -", "task–",
+    "your work package:", "work package:",
+    "goal:", "objective:", "mission:", "your job:",
+)
+# Preamble the fallback must skip so "HOUSE RULES" / "You are a …" never
+# become the topic.
+_SKIP_TOPIC_PREFIXES = (
+    "house rules:", "you own", "constraints:", "important:",
+    "you are ", "the specification", "hard rules:", "your final text",
+)
 # Filesystem paths and long ids make topics unreadable; collapse them.
 _PATH_RE = re.compile(r"(/[\w.\-]+){2,}/?")
 _WS_RE = re.compile(r"\s+")
@@ -45,17 +56,22 @@ def _distill_topic(prompt: str, limit: int = 90) -> str:
         low = line.lower().lstrip("#* -")
         for marker in _TASK_MARKERS:
             if low.startswith(marker):
-                chosen = line.lstrip("#* -")[len(marker):].strip()
+                chosen = line.lstrip("#* -")[len(marker):].strip(" :—–-")
                 break
         if chosen:
             break
     if not chosen:
-        # Skip pure markdown headings that carry no content of their own.
-        for line in lines[:5]:
+        # Skip pure markdown headings and shared preamble so the first
+        # real instruction is what the floor shows.
+        for line in lines[:12]:
             stripped = line.lstrip("#* -").strip()
-            if len(stripped) > 12:
-                chosen = stripped
-                break
+            low = stripped.lower()
+            if len(stripped) <= 12:
+                continue
+            if any(low.startswith(p) for p in _SKIP_TOPIC_PREFIXES):
+                continue
+            chosen = stripped
+            break
         chosen = chosen or lines[0]
 
     chosen = _PATH_RE.sub("…", chosen)
@@ -67,6 +83,105 @@ def _distill_topic(prompt: str, limit: int = 90) -> str:
             chosen = chosen[:idx]
             break
     return chosen[:limit].strip()
+
+
+def classify_activity(
+    *,
+    ended: Optional[datetime],
+    tail: Optional[dict],
+    pending_tools: Optional[List[dict]],
+    prompt: str = "",
+    role: str = "session",
+) -> dict:
+    """What a live session or running agent is doing, from its transcript tail.
+
+    A tool_use with no tool_result yet is a tool still executing (or parked
+    on a permission prompt); a trailing tool_result or user message means
+    the model is computing its next step; an assistant record that stopped
+    with end_turn means the turn is over. ``role`` only changes the waiting
+    copy — a subagent does not wait for the user, it waits on its parent.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    idle = (now - ended.timestamp()) if ended else None
+    waiting_for = ("waiting on the parent" if role == "agent"
+                   else "waiting for your input")
+    interrupted = ("interrupted — waiting on the parent" if role == "agent"
+                   else "interrupted — waiting for you")
+
+    def entry(state: str, label: str, detail: str = "", sub: str = "",
+              since: Optional[float] = None, **extra) -> dict:
+        d = {
+            "state": state,
+            "label": label,
+            "detail": detail,
+            "sub": sub,
+            "since_s": max(0.0, now - since) if since else None,
+            "idle_s": idle,
+            # A working state that has written nothing for this long is
+            # usually parked on a permission prompt or was abandoned.
+            "stalled": bool(
+                state != "waiting" and idle is not None and idle > 900
+            ),
+        }
+        if state != "waiting" and prompt:
+            d["prompt"] = prompt[:180]
+        d.update(extra)
+        return d
+
+    tail = tail or {}
+    kind = tail.get("kind")
+    ts = tail.get("ts")
+    # A cleanly ended or interrupted turn cannot still be running tools —
+    # anything left open is a leftover from a killed process, not work.
+    turn_over = kind == "interrupt" or (
+        kind == "assistant"
+        and tail.get("stop") in ("end_turn", "stop_sequence")
+    )
+    if not turn_over:
+        # Ignore ancient leftovers a crash never resolved: no tool the
+        # harness runs in the foreground lives this long.
+        fresh = [t for t in (pending_tools or [])
+                 if t.get("ts") and now - t["ts"] < 7200]
+        if fresh:
+            t = fresh[-1]
+            others = len(fresh) - 1
+            label = f"running {t.get('name') or 'a tool'}"
+            if others:
+                label += f" +{others} more"
+            return entry("tool", label, t.get("text") or "",
+                         t.get("sub") or "", t.get("ts"),
+                         # Every in-flight call, oldest first — so the UI
+                         # can show them all, not just the newest.
+                         tools=[{
+                             "name": p.get("name") or "?",
+                             "text": p.get("text") or "",
+                             "sub": p.get("sub") or "",
+                             "since_s": (max(0.0, now - p["ts"])
+                                         if p.get("ts") else None),
+                         } for p in fresh])
+    if kind == "interrupt":
+        return entry("waiting", interrupted, since=ts)
+    if kind == "result":
+        # The CLI flushes a tool_use record only together with its result,
+        # so mid-turn the just-returned tool is the freshest evidence of
+        # what the session is working on.
+        tool = tail.get("tool") or {}
+        if tool.get("name"):
+            return entry("thinking", f"working — after {tool['name']}",
+                         tool.get("text") or "", tool.get("sub") or "", ts,
+                         tool_name=tool["name"])
+        return entry("thinking", "processing tool results", since=ts)
+    if kind == "prompt":
+        return entry("thinking", "working on the prompt", since=ts)
+    if kind == "assistant" and not turn_over:
+        e = entry("responding", "writing a response", since=ts)
+        if e["since_s"] is not None and e["since_s"] > 45:
+            # Text chunks land every few seconds while genuinely writing;
+            # a long quiet stretch mid-turn is usually an unflushed tool
+            # call still executing.
+            e["label"] = "working — running a tool or thinking"
+        return e
+    return entry("waiting", waiting_for, since=ts)
 
 
 def timeline_split(point: tuple) -> tuple:
@@ -270,6 +385,17 @@ class AgentRun:
     completed: bool = False
     # Final text the agent reported back, used to summarise its outcome.
     final_message: str = ""
+    # Transcript-tail state, same shape as Session: last meaningful record
+    # and any tool calls that have not returned a result yet. Drives the
+    # live "what is it doing" readout on the Agents floor.
+    tail: dict = field(default_factory=dict)
+    pending_tools: List[dict] = field(default_factory=list)
+    # Compact log of recent completed tools / text, newest last. Capped
+    # by the parser; the UI reverses it to show the live trace.
+    recent: List[dict] = field(default_factory=list)
+    # Per-call series, same shape as Session.timeline, so the Agents floor
+    # can draw tokens over time the way a session page does.
+    timeline: List[tuple] = field(default_factory=list)
 
     @property
     def duration_s(self) -> float:
@@ -313,6 +439,18 @@ class AgentRun:
             return "stopped"
         idle = (datetime.now(timezone.utc) - self.ended).total_seconds()
         return "running" if idle <= stale_after_s else "stopped"
+
+    def activity(self, *, parent_live: bool = False) -> Optional[dict]:
+        """What this agent is doing right now; None unless it is running."""
+        if self.state(parent_live=parent_live) != "running":
+            return None
+        return classify_activity(
+            ended=self.ended,
+            tail=self.tail,
+            pending_tools=self.pending_tools,
+            prompt=self.topic,
+            role="agent",
+        )
 
 
 @dataclass
@@ -388,88 +526,15 @@ class Session:
         """
         if not self.is_live:
             return None
-        now = datetime.now(timezone.utc).timestamp()
-        idle = (now - self.ended.timestamp()) if self.ended else None
-
-        # What the turn is answering — context for every non-waiting state.
         prompt = (self.last_prompt or "").strip()
         if not prompt and self.prompts:
             prompt = (self.prompts[-1].get("text") or "").strip()
-
-        def entry(state: str, label: str, detail: str = "", sub: str = "",
-                  since: Optional[float] = None, **extra) -> dict:
-            d = {
-                "state": state,
-                "label": label,
-                "detail": detail,
-                "sub": sub,
-                "since_s": max(0.0, now - since) if since else None,
-                "idle_s": idle,
-                # A working state that has written nothing for this long is
-                # usually parked on a permission prompt or was abandoned.
-                "stalled": bool(
-                    state != "waiting" and idle is not None and idle > 900
-                ),
-            }
-            if state != "waiting" and prompt:
-                d["prompt"] = prompt[:180]
-            d.update(extra)
-            return d
-
-        tail = self.tail or {}
-        kind = tail.get("kind")
-        ts = tail.get("ts")
-        # A cleanly ended or interrupted turn cannot still be running tools —
-        # anything left open is a leftover from a killed process, not work.
-        turn_over = kind == "interrupt" or (
-            kind == "assistant"
-            and tail.get("stop") in ("end_turn", "stop_sequence")
+        return classify_activity(
+            ended=self.ended,
+            tail=self.tail,
+            pending_tools=self.pending_tools,
+            prompt=prompt,
         )
-        if not turn_over:
-            # Ignore ancient leftovers a crash never resolved: no tool the
-            # harness runs in the foreground lives this long.
-            fresh = [t for t in self.pending_tools
-                     if t.get("ts") and now - t["ts"] < 7200]
-            if fresh:
-                t = fresh[-1]
-                others = len(fresh) - 1
-                label = f"running {t.get('name') or 'a tool'}"
-                if others:
-                    label += f" +{others} more"
-                return entry("tool", label, t.get("text") or "",
-                             t.get("sub") or "", t.get("ts"),
-                             # Every in-flight call, oldest first — so the UI
-                             # can show them all, not just the newest.
-                             tools=[{
-                                 "name": p.get("name") or "?",
-                                 "text": p.get("text") or "",
-                                 "sub": p.get("sub") or "",
-                                 "since_s": (max(0.0, now - p["ts"])
-                                             if p.get("ts") else None),
-                             } for p in fresh])
-        if kind == "interrupt":
-            return entry("waiting", "interrupted — waiting for you", since=ts)
-        if kind == "result":
-            # The CLI flushes a tool_use record only together with its result,
-            # so mid-turn the just-returned tool is the freshest evidence of
-            # what the session is working on.
-            tool = tail.get("tool") or {}
-            if tool.get("name"):
-                return entry("thinking", f"working — after {tool['name']}",
-                             tool.get("text") or "", tool.get("sub") or "", ts,
-                             tool_name=tool["name"])
-            return entry("thinking", "processing tool results", since=ts)
-        if kind == "prompt":
-            return entry("thinking", "working on the prompt", since=ts)
-        if kind == "assistant" and not turn_over:
-            e = entry("responding", "writing a response", since=ts)
-            if e["since_s"] is not None and e["since_s"] > 45:
-                # Text chunks land every few seconds while genuinely writing;
-                # a long quiet stretch mid-turn is usually an unflushed tool
-                # call still executing.
-                e["label"] = "working — running a tool or thinking"
-            return e
-        return entry("waiting", "waiting for your input", since=ts)
 
     @property
     def duration_s(self) -> float:

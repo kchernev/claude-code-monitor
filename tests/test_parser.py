@@ -540,6 +540,54 @@ def test_a_plain_prompt_is_the_tail_when_nothing_is_in_flight(corpus_dir):
     assert parse_session_file(s.build()).tail["kind"] == "prompt"
 
 
+def test_an_agent_transcript_keeps_a_per_call_timeline(corpus_dir):
+    s = corpus_dir.session()
+    ag = s.agent("a1", meta={"description": "Map it"})
+    ag.assistant(output=40)
+    ag.assistant(output=25, cache_read=800)
+    run = parse_session_file(s.build()).agents[0]
+    assert len(run.timeline) == 2
+    assert run.timeline[0][1] == 40
+    assert run.timeline[1][1] == 25
+
+
+def test_an_agent_unanswered_tool_call_is_left_pending(corpus_dir):
+    s = corpus_dir.session()
+    s.agent("a1", meta={"agentType": "Explore", "description": "Map it"}
+            ).assistant(tools=[tool_use("Bash", {"command": "ls -la"}, "tu_1")])
+    run = parse_session_file(s.build()).agents[0]
+
+    assert [t["name"] for t in run.pending_tools] == ["Bash"]
+    assert run.pending_tools[0]["text"] == "ls -la"
+    assert run.tail["kind"] == "assistant"
+    assert run.recent == []
+
+
+def test_an_agent_returned_tool_lands_on_the_recent_trace(corpus_dir):
+    s = corpus_dir.session()
+    ag = s.agent("a1", meta={"description": "Map it"})
+    ag.assistant(tools=[tool_use("Read", {"file_path": "/x.py"}, "tu_1")])
+    ag.user_result("tu_1", content="ok")
+    run = parse_session_file(s.build()).agents[0]
+
+    assert run.pending_tools == []
+    assert run.tail["kind"] == "result"
+    assert run.tail["tool"]["name"] == "Read"
+    assert [e["name"] for e in run.recent] == ["Read"]
+    assert run.recent[0]["text"] == "/x.py"
+    assert run.recent[0]["error"] is False
+
+
+def test_an_agent_tool_error_is_flagged_on_the_trace(corpus_dir):
+    s = corpus_dir.session()
+    ag = s.agent("a1")
+    ag.assistant(tools=[tool_use("Bash", {"command": "false"}, "tu_1")])
+    ag.user_result("tu_1", content="exit 1", is_error=True)
+    run = parse_session_file(s.build()).agents[0]
+    assert run.recent[0]["error"] is True
+    assert run.tool_errors == 1
+
+
 # ---------------------------------------------------------------------------
 # Cache serialisation
 # ---------------------------------------------------------------------------
@@ -574,6 +622,10 @@ def test_a_session_survives_a_round_trip_through_the_cache_format(corpus_dir):
         a.agent_id for a in original.agents]
     assert restored.agents[0].description == "Look around"
     assert restored.agents[0].completed is True
+    assert restored.agents[0].tail == original.agents[0].tail
+    assert restored.agents[0].pending_tools == original.agents[0].pending_tools
+    assert restored.agents[0].recent == original.agents[0].recent
+    assert restored.agents[0].timeline == original.agents[0].timeline
     assert restored.total_cost == pytest.approx(original.total_cost)
 
 

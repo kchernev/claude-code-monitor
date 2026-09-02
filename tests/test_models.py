@@ -124,10 +124,30 @@ def test_an_explicit_task_line_wins_over_surrounding_prose():
     assert _distill_topic(prompt) == "Audit the parser for duplicate billing"
 
 
-@pytest.mark.parametrize("marker", ["TASK:", "Goal:", "OBJECTIVE:", "mission:",
-                                    "Your job:"])
+@pytest.mark.parametrize("marker", ["TASK:", "TASK —", "Goal:", "OBJECTIVE:",
+                                    "mission:", "Your job:"])
 def test_task_markers_are_recognised_case_insensitively(marker):
     assert _distill_topic(marker + " ship the thing") == "ship the thing"
+
+
+def test_a_workflow_task_em_dash_beats_the_house_rules_preamble():
+    prompt = (
+        "HOUSE RULES: product language everywhere a person can see it\n"
+        "A test server runs at http://localhost:5099.\n"
+        "TASK — Trust.tsx, Money.tsx and ToBuild.tsx fixes. You own EXACTLY "
+        "those three files in /home/smith/workspace/aifbox/client/src/admin/\n"
+    )
+    assert _distill_topic(prompt) == "Trust.tsx, Money.tsx and ToBuild.tsx fixes"
+
+
+def test_a_work_package_line_beats_the_you_are_an_agent_preamble():
+    prompt = (
+        "You are an implementation agent working inside /home/dev/proj\n"
+        "THE SPECIFICATION is /tmp/spec.md\n"
+        "YOUR WORK PACKAGE: WP0.8 — Pairing hygiene: trunk-to-canopy merge\n"
+        "Sub-waves 0a and 0b run together now.\n"
+    )
+    assert _distill_topic(prompt).startswith("WP0.8")
 
 
 def test_a_marker_still_reads_through_markdown_bullets_and_hashes():

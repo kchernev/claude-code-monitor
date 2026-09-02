@@ -739,6 +739,85 @@ function stackArea(host, points, opts = {}) {
   });
 }
 
+/** Packed per-minute bars of summed output tokens. Live updates patch
+    bar heights when the axis hasn't changed. */
+function outputBars(host, points, opts = {}) {
+  const W = host.clientWidth || (host.parentElement && host.parentElement.clientWidth) || 640;
+  const H = opts.height || 112;
+  const pad = { t: 8, r: 6, b: 20, l: 46 };
+  if (!points.length || !points.some(p => p.out > 0)) {
+    if (!host.querySelector('.empty'))
+      host.innerHTML = '<div class="empty">No output yet — bars appear as this agent writes.</div>';
+    return;
+  }
+  const n = points.length;
+  const plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+  const gap = 1;
+  const slot = plotW / n;
+  const bw = Math.max(1, slot - gap);
+  const dataMax = Math.max(1, ...points.map(p => p.out));
+  const sc = niceScale(Math.max(dataMax, +host.dataset.ymax || 0));
+  host.dataset.ymax = sc.max;
+  const X = i => pad.l + i * slot + gap / 2;
+  const Y = v => H - pad.b - (v / sc.max) * plotH;
+  const geom = (p, i) => {
+    const h = p.out > 0 ? Math.max(1.5, (p.out / sc.max) * plotH) : 0;
+    return { x: X(i), y: H - pad.b - h, w: bw, h };
+  };
+  const layout = `${W}|${H}|${n}|${sc.max}|${points[0].t}|${points[n - 1].t}`;
+  host._flowPts = points;
+  if (host.dataset.layout === layout && host.querySelector('svg.ag-flow-svg')) {
+    points.forEach((p, i) => {
+      const g = geom(p, i);
+      const bar = host.querySelector(`rect[data-bar="${i}"]`);
+      if (!bar) return;
+      bar.setAttribute('y', g.y);
+      bar.setAttribute('height', g.h);
+      bar.setAttribute('opacity', p.out > 0 ? 1 : 0);
+    });
+    return;
+  }
+  host.innerHTML = '';
+  host.dataset.layout = layout;
+  const s = svg('svg', { class: 'chart ag-flow-svg',
+    viewBox: `0 0 ${W} ${H}`, height: H }, host);
+  for (const v of sc.ticks) {
+    const y = Y(v);
+    svg('line', { class: 'grid-line', x1: pad.l, x2: W - pad.r, y1: y, y2: y }, s);
+    const lab = svg('text', { class: 'axis-t', x: 4, y: y + 3 }, s);
+    lab.textContent = (opts.fmt || tok)(v);
+  }
+  const x0 = points[0].t, x1 = points[n - 1].t + (opts.bucket || 60);
+  const Xt = t => pad.l + (x1 === x0 ? 0 : (t - x0) / (x1 - x0)) * plotW;
+  if (x1 > x0) timeAxis(s, Xt, x0, x1, H - 5);
+  const fill = (opts.color || KIND.output.hex);
+  points.forEach((p, i) => {
+    const g = geom(p, i);
+    svg('rect', {
+      x: g.x, y: g.y, width: g.w, height: g.h, fill,
+      rx: Math.min(2, bw / 3), 'data-bar': i,
+      opacity: p.out > 0 ? 1 : 0,
+    }, s);
+  });
+  const hit = svg('rect', { x: pad.l, y: pad.t, width: plotW, height: plotH,
+    fill: 'transparent' }, s);
+  hit.addEventListener('mousemove', e => {
+    const pts = host._flowPts || points;
+    const bb = s.getBoundingClientRect();
+    const px = (e.clientX - bb.left) * (W / bb.width);
+    let i = Math.floor((px - pad.l) / slot);
+    i = Math.max(0, Math.min(pts.length - 1, i));
+    const p = pts[i];
+    const when = new Date(p.t * 1000).toLocaleTimeString(undefined,
+      { hour: '2-digit', minute: '2-digit' });
+    tipEl.textContent = `${when}\n${tok(p.out)} output`;
+    tipEl.classList.add('on');
+    tipEl.style.left = Math.min(e.clientX + 13, innerWidth - 180) + 'px';
+    tipEl.style.top = Math.max(8, e.clientY - 46) + 'px';
+  });
+  hit.addEventListener('mouseleave', hideTip);
+}
+
 /** A stat tile for one token kind: the kind's colour as a dot, the count as
     the figure, one line of context underneath, optional sparkline. */
 function kindTile(k, v, note, opts = {}) {
@@ -999,7 +1078,7 @@ function nowPanel(s, agents = []) {
       <span class="np-agk"><i></i>${agents.length} agent${
         agents.length > 1 ? 's' : ''} running</span>
       ${agents.slice(0, SHOW).map(x => `<a class="np-agent"
-        href="#/agent/${esc(s.id)}/${esc(x.id)}" title="${esc(x.topic || '')}">${
+        href="#/agents/${esc(s.id)}/${esc(x.id)}" title="${esc(x.topic || '')}">${
         esc((x.topic || x.type || x.id).slice(0, 44))} ${x.started ?
         tickSince((Date.now() - new Date(x.started).getTime()) / 1000) : ''}</a>`).join('')}
       ${agents.length > SHOW ? `<span class="mut">+${agents.length - SHOW} more</span>` : ''}
@@ -1033,6 +1112,457 @@ const agentsCell = s => {
   return `<span class="agr" title="${run2} running now · ${total} total"><i></i>${
     run2}</span> <span class="mut">/${total}</span>`;
 };
+
+// ── Agents floor (live workspaces → running agents → live trace) ─────
+const shortCwd = p => {
+  if (!p) return '';
+  const parts = String(p).split('/').filter(Boolean);
+  return parts.length <= 3 ? p : '…/' + parts.slice(-3).join('/');
+};
+const clockTs = ts => ts
+  ? new Date(ts * 1000).toLocaleTimeString(undefined,
+      { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  : '';
+const capFirst = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+const TOPIC_MARKERS = ['your work package:', 'work package:', 'task:', 'task —',
+  'task -', 'goal:', 'objective:', 'mission:', 'your job:'];
+const TOPIC_SKIP = ['house rules:', 'you own', 'constraints:', 'important:',
+  'you are ', 'the specification', 'hard rules:', 'your final text'];
+function distillTopic(prompt, limit = 90) {
+  const lines = String(prompt || '').split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return '';
+  let chosen = '';
+  for (const line of lines.slice(0, 40)) {
+    const low = line.toLowerCase().replace(/^[#*\s-]+/, '');
+    const mk = TOPIC_MARKERS.find(m => low.startsWith(m));
+    if (mk) { chosen = line.replace(/^[#*\s-]+/, '').slice(mk.length).replace(/^[\s:—–-]+/, ''); break; }
+  }
+  if (!chosen) {
+    for (const line of lines.slice(0, 12)) {
+      const stripped = line.replace(/^[#*\s-]+/, '').trim();
+      const low = stripped.toLowerCase();
+      if (stripped.length <= 12) continue;
+      if (TOPIC_SKIP.some(p => low.startsWith(p))) continue;
+      chosen = stripped; break;
+    }
+    chosen = chosen || lines[0];
+  }
+  chosen = chosen.replace(/(\/[\w.\-]+){2,}\/?/g, '…').replace(/\s+/g, ' ').trim();
+  for (const stop of ['. ', '; ', ' — ', ', ']) {
+    const i = chosen.indexOf(stop);
+    if (i >= 25 && i <= limit) { chosen = chosen.slice(0, i); break; }
+  }
+  return chosen.slice(0, limit).trim();
+}
+function agentTitle(a) {
+  const t = a.topic || '';
+  const boiled = /^(you are |house rules:)/i.test(t);
+  if (!boiled && t) return t;
+  if (a.prompt) {
+    const d = distillTopic(a.prompt);
+    if (d && !/^(you are |house rules:)/i.test(d)) return d;
+  }
+  const act = a.activity || {};
+  return act.sub || (act.detail || '').slice(0, 72) || act.label || a.type || t || a.id;
+}
+
+function agentsPick(workspaces, sid, aid) {
+  const matchS = s => !sid || s.id === sid || s.id.startsWith(sid);
+  if (sid) {
+    for (const ws of workspaces) {
+      for (const s of ws.sessions || []) {
+        if (!matchS(s)) continue;
+        if (aid) {
+          const a = (s.running || []).find(x => x.id === aid);
+          if (a) return { kind: 'agent', workspace: ws, session: s, agent: a };
+          return { kind: 'gone', workspace: ws, session: s, sid: s.id, aid };
+        }
+        return { kind: 'session', workspace: ws, session: s };
+      }
+    }
+    if (aid) return { kind: 'gone', sid, aid };
+  }
+  for (const ws of workspaces) {
+    for (const s of ws.sessions || []) {
+      if (s.running && s.running[0])
+        return { kind: 'agent', workspace: ws, session: s, agent: s.running[0], auto: true };
+    }
+  }
+  if (workspaces[0] && workspaces[0].sessions && workspaces[0].sessions[0])
+    return { kind: 'session', workspace: workspaces[0],
+             session: workspaces[0].sessions[0], auto: true };
+  return { kind: 'none' };
+}
+
+function agentsTreeHTML(workspaces, sel) {
+  const selKey = sel.kind === 'agent' ? `${sel.session.id}/${sel.agent.id}`
+    : sel.kind === 'session' ? sel.session.id : '';
+  return workspaces.map(ws => {
+    const hue = hueFor(ws.project);
+    const n = ws.agents_running || 0;
+    const sess = (ws.sessions || []).map(s => {
+      const leadOn = selKey === s.id ? ' on' : '';
+      const nodes = (s.running || []).map(a => {
+        const act = a.activity || {};
+        const on = selKey === `${s.id}/${a.id}` ? ' on' : '';
+        const detail = act.detail || '';
+        return `<a class="ag-node ${esc(act.state || '')}${on}"
+          href="#/agents/${esc(s.id)}/${esc(a.id)}"
+          data-agkey="${esc(s.id)}/${esc(a.id)}">
+          <i class="ag-pulse" aria-hidden="true"></i>
+          <span>
+            <span class="ag-topic">${esc(agentTitle(a))}</span>
+            <span class="ag-doing">${esc(act.label || a.type || '')}</span>
+            ${detail ? `<code>${esc(detail)}</code>` : ''}
+          </span>
+          ${tickSince(act.since_s)}
+        </a>`;
+      }).join('');
+      return `<div class="ag-sess">
+        <a class="ag-lead${leadOn}" href="#/agents/${esc(s.id)}" data-agkey="${esc(s.id)}">
+          <span class="ag-topic">${esc(s.title || s.short)}</span>
+          ${actHTML(s)}
+        </a>
+        ${nodes || '<div class="ag-empty-n">No agents running in this session</div>'}
+      </div>`;
+    }).join('');
+    return `<div class="ag-ws">
+      <div class="ag-ws-h">
+        <span class="ag-ws-mark" style="background:${hue}" aria-hidden="true"></span>
+        <div class="ag-ws-id">
+          <b>${esc(ws.project)}</b>
+          <span title="${esc(ws.cwd || '')}">${esc(shortCwd(ws.cwd))}</span>
+        </div>
+        <span class="ag-ws-n" title="${n} agent${n === 1 ? '' : 's'} running">${n}</span>
+      </div>
+      ${sess}
+    </div>`;
+  }).join('');
+}
+
+function agentsTraceRow(e, live) {
+  const name = e.name || (e.kind === 'text' ? 'text' : 'tool');
+  const text = e.text || '';
+  const when = live ? tickSince(e.since_s) : clockTs(e.ts);
+  return `<li class="ag-tr${live ? ' live' : ''}${e.error ? ' err' : ''}">
+    <span class="ag-tr-t">${when}</span>
+    <span class="ag-tr-n">${esc(name)}</span>
+    <code>${esc(text)}</code>
+    ${e.error ? '<span class="ag-tr-err">error</span>' : ''}
+  </li>`;
+}
+
+function agentsNowHTML(act, extraMeta, fallback) {
+  if (!act) return '';
+  const tools = act.tools || [];
+  const more = tools.length > 1
+    ? `<div class="ag-now-tools">${tools.map(t =>
+        `<div class="np-row">
+          <span class="np-badge">${esc(t.name || '?')}</span>
+          <code>${esc(t.text || '(no arguments)')}</code>
+          ${tickSince(t.since_s)}
+        </div>`).join('')}</div>`
+    : '';
+  const useFb = !act.detail && fallback && (act.state === 'thinking' || act.state === 'tool');
+  const detail = act.detail || (useFb ? fallback.text : '') || '';
+  const sub = act.sub || (useFb ? fallback.sub : '') || '';
+  return `<div class="ag-now ${esc(act.state || '')}">
+    <div class="ag-now-meta">${extraMeta || ''}</div>
+    <h2>${esc(capFirst(act.label || 'Working'))}</h2>
+    ${detail ? `<code class="ag-now-cmd">${esc(detail)}</code>` : ''}
+    ${sub && sub !== detail
+      ? `<div class="ag-now-sub">${esc(sub)}</div>` : ''}
+    <div class="ag-now-t">${tickSince(act.since_s)}${
+      act.stalled ? '<span class="astall">stalled?</span>' : ''}</div>
+    ${more}
+  </div>`;
+}
+
+function agentsStageHTML(sel) {
+  if (sel.kind === 'none') {
+    return `<div class="ag-vacant" style="border:0;box-shadow:none;min-height:0">
+      <b>Pick a live workspace</b>
+      Running agents appear in the tree the moment they start.
+    </div>`;
+  }
+  if (sel.kind === 'gone') {
+    const href = sel.sid && sel.aid
+      ? `#/agent/${esc(sel.sid)}/${esc(sel.aid)}` : '#/agents';
+    return `<div class="ag-gone">
+      <b>This agent is no longer running</b>
+      <p class="sub">It finished, stopped, or the session went idle.</p>
+      <a class="btn" href="${href}">Full run →</a>
+    </div>`;
+  }
+  if (sel.kind === 'session') {
+    const s = sel.session, ws = sel.workspace;
+    const act = s.activity || {};
+    const running = s.running || [];
+    const cards = running.map(a => {
+      const aact = a.activity || {};
+      const detail = aact.detail || '';
+      return `<a class="ag-card ${esc(aact.state || '')}"
+        href="#/agents/${esc(s.id)}/${esc(a.id)}">
+        <i class="ag-pulse" aria-hidden="true"></i>
+        <span class="ag-card-b">
+          <b>${esc(agentTitle(a))}</b>
+          <span class="ag-doing">${esc(aact.label || a.type || 'running')}</span>
+          ${detail ? `<code title="${esc(aact.sub || detail)}">${esc(
+            detail.length > 140 ? detail.slice(0, 140) + '…' : detail)}</code>` : ''}
+        </span>
+        ${tickSince(aact.since_s)}
+      </a>`;
+    }).join('');
+    const hero = running.length
+      ? `<div class="ag-now tool">
+          <div class="ag-now-meta">${stPill(sessStatus(s))}
+            <span class="mchip">${esc(s.model_label || '')}</span></div>
+          <h2>${running.length} agent${running.length === 1 ? '' : 's'} running</h2>
+          ${act.label ? `<div class="ag-now-sub">main thread ${esc(act.label)}</div>` : ''}
+        </div>`
+      : agentsNowHTML(act, `${stPill(sessStatus(s))}
+        <span class="mchip">${esc(s.model_label || '')}</span>`);
+    return `
+      <div class="ag-kicker">
+        <a href="#/session/${esc(s.id)}">${esc(ws.project)}</a>
+        · ${esc(s.title || s.short)}
+      </div>
+      ${hero}
+      <div class="ag-stats">
+        <div><b>${tok(s.tokens)}</b><span>tokens</span></div>
+        <div><b>${usd(s.cost)}</b><span>list-price</span></div>
+        <div><b>${s.agents_running || running.length}</b><span>agents live</span></div>
+        <div><b class="dur">${dur(s.duration_s)}</b><span>session</span></div>
+      </div>
+      ${cards ? `<div class="ag-cards">${cards}</div>`
+        : `<div class="ag-trace-empty">No subagents running — this is the main thread.</div>`}`;
+  }
+  const p = agentStageParts(sel);
+  return `${p.kicker}${p.now}${p.stats}${p.task}
+    <div id="agflow" class="ag-flow" data-key="${esc(p.key)}"></div>
+    ${p.trace}`;
+}
+
+function agentStageParts(sel) {
+  const a = sel.agent, s = sel.session, ws = sel.workspace;
+  const act = a.activity || {};
+  const recent = (a.recent || []).slice().reverse();
+  const lastDone = (a.recent || []).slice(-1)[0];
+  const liveRows = (act.tools && act.tools.length)
+    ? act.tools.map(t => agentsTraceRow(t, true)).join('')
+    : (act.state && act.state !== 'waiting' ? agentsTraceRow({
+        name: act.tool_name || act.state, text: act.detail || act.label,
+        since_s: act.since_s,
+      }, true) : '');
+  const hist = recent.map(e => agentsTraceRow(e, false)).join('');
+  const title = agentTitle(a);
+  const boilerplate = /^(you are |house rules:)/i.test(a.topic || '');
+  return {
+    key: `${s.id}/${a.id}`,
+    kicker: `<div class="ag-kicker">
+      <a href="#/session/${esc(s.id)}">${esc(ws.project)}</a>
+      · ${esc(s.title || s.short)}
+      · <a href="#/agent/${esc(s.id)}/${esc(a.id)}">full run</a>
+    </div>`,
+    now: agentsNowHTML(act, `<span class="ag-type mchip">${esc(a.type)}</span>
+      <span class="mchip">${esc(a.model_label || '')}</span>
+      ${agentPill(a.state)}`, lastDone),
+    stats: `<div class="ag-stats">
+      <div><b>${tok(a.tokens)}</b><span>tokens</span></div>
+      <div><b>${usd(a.cost)}</b><span>list-price</span></div>
+      <div><b>${a.api_calls}</b><span>calls</span></div>
+      <div><b class="dur">${dur(a.duration_s)}</b><span>running</span></div>
+    </div>`,
+    task: title && !boilerplate ? `<div class="ag-task">task <q>${esc(title)}</q></div>` : '',
+    trace: `<ol class="ag-trace">${liveRows}${hist || (liveRows ? '' :
+      '<li class="ag-trace-empty">No tool calls yet — waiting for the first write.</li>')}</ol>`,
+  };
+}
+
+function swapEl(sel, html, root) {
+  const el = $(sel, root);
+  if (!el || !html) return null;
+  const t = document.createElement('template');
+  t.innerHTML = html.trim();
+  const next = t.content.firstElementChild;
+  if (!next) return el;
+  el.replaceWith(next);
+  return next;
+}
+
+const AGENT_FLOW_BUCKET = 60;
+
+function bucketOutputBars(raw, bucketS = AGENT_FLOW_BUCKET, until) {
+  if (!raw.length) return [];
+  const pts = raw.slice().sort((a, b) => a.t - b.t);
+  const step = bucketS;
+  let t0 = Math.floor(pts[0].t / step) * step;
+  let t1 = Math.floor(pts[pts.length - 1].t / step) * step;
+  // At most one extra live minute after the last write — don't stretch
+  // the axis with a long empty tail.
+  if (until) t1 = Math.min(Math.max(t1, Math.floor(until / step) * step), t1 + step);
+  const maxB = 360;
+  if ((t1 - t0) / step + 1 > maxB) t0 = t1 - (maxB - 1) * step;
+  const by = new Map();
+  for (const p of pts) {
+    const k = Math.floor(p.t / step) * step;
+    by.set(k, (by.get(k) || 0) + (p.out || p.output || 0));
+  }
+  const out = [];
+  for (let t = t0; t <= t1 + 1e-9; t += step)
+    out.push({ t, out: by.get(t) || 0 });
+  return out;
+}
+
+function agentFlowDraw(host, agent, opts = {}) {
+  const until = opts.live ? Date.now() / 1000 : undefined;
+  const points = bucketOutputBars(agent.timeline || [], AGENT_FLOW_BUCKET, until);
+  host.dataset.key = opts.key || host.dataset.key || '';
+  if (!host.querySelector('.ag-flow-plot')) {
+    host.innerHTML = `
+      <div class="ag-flow-h">
+        <div class="ag-flow-leg">
+          <span><i style="background:${KIND.output.hex}"></i>Output</span>
+          <span class="mut">per minute</span>
+        </div>
+      </div>
+      <div class="ag-flow-plot"></div>`;
+  }
+  outputBars(host.querySelector('.ag-flow-plot'), points, { height: 112, bucket: 60 });
+}
+
+function agentFlowMount(sel, { keep } = {}) {
+  const host = $('#agflow');
+  if (!host || sel.kind !== 'agent' || !sel.agent) return;
+  const key = `${sel.session.id}/${sel.agent.id}`;
+  const opts = { key, live: sel.agent.state === 'running' };
+  if (keep && keep.dataset.key === key) {
+    host.replaceWith(keep);
+    agentFlowDraw(keep, sel.agent, opts);
+    return;
+  }
+  agentFlowDraw(host, sel.agent, opts);
+}
+
+let agentsEnrich = { key: '', data: null };
+function applyAgentEnrich(workspaces) {
+  if (!agentsEnrich.data) return workspaces;
+  const [sid, aid] = agentsEnrich.key.split('|');
+  for (const w of workspaces) {
+    for (const s of w.sessions || []) {
+      if (s.id !== sid && !s.id.startsWith(sid)) continue;
+      const a = (s.running || []).find(x => x.id === aid);
+      if (a) Object.assign(a, agentsEnrich.data);
+    }
+  }
+  return workspaces;
+}
+
+function normalizeWorkspaces(live) {
+  // Prefer the server grouping. Fall back to assembling it from the live
+  // session list + running_agents — that's what /api/live already shipped
+  // before workspaces existed, so an un-restarted server still fills the floor.
+  if (Array.isArray(live.workspaces) && live.workspaces.length)
+    return live.workspaces;
+  const sessions = (live.live || []).map(s => ({ ...s, running: s.running ? s.running.slice() : [] }));
+  const byId = new Map(sessions.map(s => [s.id, s]));
+  for (const a of live.running_agents || []) {
+    let s = byId.get(a.session_id);
+    if (!s) {
+      s = [...byId.values()].find(x =>
+        x.id.startsWith(a.session_id) || a.session_id.startsWith(x.id));
+    }
+    if (s) s.running.push(a);
+  }
+  const groups = new Map();
+  const order = [];
+  for (const s of sessions) {
+    const key = s.cwd || s.project || s.id;
+    if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+    groups.get(key).push(s);
+  }
+  const out = order.map(key => {
+    const sess = groups.get(key);
+    return {
+      project: sess[0].project,
+      cwd: sess[0].cwd,
+      sessions: sess,
+      agents_running: sess.reduce((n, s) => n + (s.running || []).length, 0),
+    };
+  });
+  out.sort((a, b) => b.agents_running - a.agents_running);
+  return out;
+}
+
+function agentsFloorHTML(workspaces, sid, aid) {
+  if (!workspaces.length) {
+    return `<div class="ag-vacant">
+      <b>No live workspaces</b>
+      Agents show up here while a Claude Code session is running.
+      <span class="mut">Start a session, or check <a href="#/sessions">Sessions</a> for history.</span>
+    </div>`;
+  }
+  const sel = agentsPick(workspaces, sid, aid);
+  return `<aside class="ag-tree" aria-label="Active workspaces">${
+    agentsTreeHTML(workspaces, sel)}</aside>
+    <section class="ag-stage" data-agstage>${agentsStageHTML(sel)}</section>`;
+}
+
+function agentsSubline(live) {
+  const ws = normalizeWorkspaces(live);
+  const nWs = ws.length;
+  const nAg = (live.running_agents || []).length
+    || ws.reduce((n, w) => n + (w.agents_running || 0), 0);
+  if (!nWs) return 'Nothing running right now';
+  return `${nWs} workspace${nWs === 1 ? '' : 's'} · ${nAg} agent${nAg === 1 ? '' : 's'} live`;
+}
+
+function paintAgentsFloor(live, sid, aid) {
+  const floor = $('#agfloor');
+  if (!floor) return;
+  const ws = applyAgentEnrich(normalizeWorkspaces(live));
+  const sel = agentsPick(ws, sid, aid);
+  const tree = $('.ag-tree', floor);
+  const stage = $('.ag-stage', floor);
+  const sub = $('#view .hd .sub');
+  if (sub) sub.textContent = agentsSubline(live);
+
+  if (!tree || !stage) {
+    floor.innerHTML = agentsFloorHTML(ws, sid, aid);
+    agentFlowMount(sel);
+    hydrateTips(floor);
+    return;
+  }
+
+  const tS = tree.scrollTop, sS = stage.scrollTop;
+  tree.innerHTML = agentsTreeHTML(ws, sel);
+  tree.scrollTop = tS;
+
+  const wantKey = sel.kind === 'agent' && sel.agent
+    ? `${sel.session.id}/${sel.agent.id}` : '';
+  const flow = $('#agflow', stage);
+  if (sel.kind === 'agent' && flow && flow.dataset.key === wantKey) {
+    const p = agentStageParts(sel);
+    swapEl('.ag-kicker', p.kicker, stage);
+    swapEl('.ag-now', p.now, stage);
+    swapEl('.ag-stats', p.stats, stage);
+    const task = $('.ag-task', stage);
+    if (p.task) {
+      if (task) swapEl('.ag-task', p.task, stage);
+      else flow.insertAdjacentHTML('beforebegin', p.task);
+    } else if (task) task.remove();
+    const trace = $('.ag-trace', stage);
+    const ty = trace ? trace.scrollTop : 0;
+    const nextTrace = swapEl('.ag-trace', p.trace, stage);
+    if (nextTrace) nextTrace.scrollTop = ty;
+    agentFlowDraw(flow, sel.agent, { key: wantKey, live: sel.agent.state === 'running' });
+  } else {
+    stage.innerHTML = agentsStageHTML(sel);
+    agentFlowMount(sel);
+  }
+  stage.scrollTop = sS;
+  hydrateTips(floor);
+}
 
 const avatar = name => {
   // A project can legitimately have no name (transcript with no cwd); indexing
@@ -1147,6 +1677,7 @@ const PAGE = {
   overview:  { title: 'Dashboard', skel: () => SKELETONS.tiles(3) + SKELETONS.card() },
   sessions:  { title: 'Sessions',  skel: () => SKELETONS.rows(14) },
   session:   { title: 'Session',   skel: () => SKELETONS.tiles(6) + SKELETONS.card() },
+  agents:    { title: 'Agents',    skel: () => '<div class="agfloor skel"><div class="skel-box skel-card"></div><div class="skel-box skel-card"></div></div>' },
   agent:     { title: 'Agent',     skel: () => SKELETONS.tiles(5) + SKELETONS.card() },
   workflows: { title: 'Workflows', skel: () => SKELETONS.card() + SKELETONS.card() },
   workflow:  { title: 'Workflow',  skel: () => SKELETONS.tiles(6) + SKELETONS.card() },
@@ -1177,54 +1708,73 @@ const todayChip = () => `<span class="datechip">📅 ${new Date().toLocaleDateSt
 
 
 /** Token-flow card: one API call drawn to a scope's shares — the whole
-    window, or one model. Three input streams converge on the model, one
-    output stream leaves it. Ribbon widths are linear in tokens (4px floor so
-    a 1% stream stays visible — the labels carry the exact counts); particles
+    window, or one model. The streams are the three price tiers: input at
+    full price (fresh + re-sent, both billed as cache writes), cached input
+    at 0.1×, and output. Re-sent is the one avoidable part, so it is called
+    out on the input label and in the insight strip rather than drawn as a
+    stream of its own. Ribbon widths are linear in tokens (4px floor so a 1%
+    stream stays visible — the labels carry the exact counts); particles
     travel along each ribbon, more of them on the busier streams, so it reads
-    as flow. Under it: the insight numbers, what each stream is billed at and
-    what it cost, and the window's spend at API list price.
+    as flow. Under it: the insight numbers, what each tier is billed at and
+    what it cost, and the scope's spend at API list price.
 
     scope: { win, ins, money, cells, modelLabel, sub, picker } */
+const TIERS = [
+  { key: 'input', label: 'Input', color: KIND.fresh.color,
+    note: 'read at full price — fresh content and re-sent context, both billed as cache writes' },
+  { key: 'cache_read', label: 'Cached input', color: KIND.cache_read.color,
+    note: 're-read from the prompt cache at 0.1× the input rate' },
+  { key: 'output', label: 'Output', color: KIND.output.color, note: KIND.output.note },
+];
+const tierOf = win => ({
+  input: (win.fresh || 0) + (win.resent || 0),
+  cache_read: win.cache_read || 0,
+  output: win.output || 0,
+});
 function flowCard(scope) {
   const { win, ins, money, cells } = scope;
-  const W = 640, H = 184, x0 = 148, nodeX = 396, nodeW = 88, nodeH = 52, cy = 92;
-  const inputs = [KIND.fresh, KIND.resent, KIND.cache_read];
-  const inTotal = inputs.reduce((a, k) => a + (win[k.key] || 0), 0) || 1;
-  const grand = inTotal + (win.output || 0);
+  const W = 640, H = 176, x0 = 148, nodeX = 396, nodeW = 88, nodeH = 52, cy = 88;
+  const t = tierOf(win);
+  const inTotal = t.input + t.cache_read || 1;
+  const grand = inTotal + t.output;
   const width = v => Math.max(4, 34 * v / inTotal);
-  const ys = [30, 92, 154];
+  const ys = { input: 42, cache_read: 134 };
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const uid = 'fp' + (++gradSeq);
   let n = 0;
-  const ribbon = (d, w, k, share) => {
+  const ribbon = (d, w, color, share) => {
     const id = `${uid}-${++n}`;
     // Particle count follows the stream's share; every stream keeps a couple
     // so a 1% stream still visibly moves.
     const count = still ? 0 : Math.max(2, Math.min(9, Math.round(9 * share)));
     const dur = 3.2;
     const dots = Array.from({ length: count }, (_, i) => `<circle class="dot" r="${
-      Math.min(3, 1.4 + w / 9).toFixed(1)}" fill="${k.color}">
+      Math.min(3, 1.4 + w / 9).toFixed(1)}" fill="${color}">
       <animateMotion dur="${dur}s" repeatCount="indefinite" begin="${
         (-i * dur / count).toFixed(2)}s"><mpath href="#${id}"/></animateMotion></circle>`).join('');
-    return `<path id="${id}" class="band" d="${d}" stroke="${k.color}"
+    return `<path id="${id}" class="band" d="${d}" stroke="${color}"
       stroke-width="${w.toFixed(1)}"/>${dots}`;
   };
-  // widest first so the thin streams stay on top
-  const order = inputs.map((k, i) => ({ k, y: ys[i], v: win[k.key] || 0 }))
-    .sort((a, b) => b.v - a.v);
-  const bands = order.map(({ k, y, v }) => ribbon(
-    `M${x0} ${y}C${x0 + 110} ${y},${nodeX - 100} ${cy},${nodeX} ${cy}`,
-    width(v), k, v / inTotal)).join('');
-  const outV = win.output || 0, outW = width(outV);
-  const outBand = ribbon(`M${nodeX + nodeW} ${cy}H${W - 8}`, outW, KIND.output,
-                         outV / inTotal);
-  const labels = inputs.map((k, i) => {
-    const v = win[k.key] || 0;
-    return `<text class="fl" x="8" y="${ys[i] - 4}">${esc(k.label)}</text>
-      <text class="fv" x="8" y="${ys[i] + 13}">${tok(v)}<tspan class="fs"> · ${
-      (100 * v / inTotal).toFixed(1)}% of input</tspan></text>`;
+  const inputs = TIERS.slice(0, 2);
+  // widest first so the thin stream stays on top
+  const bands = inputs.slice().sort((a, b) => t[b.key] - t[a.key]).map(k => ribbon(
+    `M${x0} ${ys[k.key]}C${x0 + 110} ${ys[k.key]},${nodeX - 100} ${cy},${nodeX} ${cy}`,
+    width(t[k.key]), k.color, t[k.key] / inTotal)).join('');
+  const outW = width(t.output);
+  const outBand = ribbon(`M${nodeX + nodeW} ${cy}H${W - 8}`, outW, KIND.output.color,
+                         t.output / inTotal);
+  const resentShare = t.input ? (win.resent || 0) / t.input : 0;
+  const labels = inputs.map(k => {
+    const y = ys[k.key], v = t[k.key];
+    return `<text class="fl" x="8" y="${y - 4}">${esc(k.label)}</text>
+      <text class="fv" x="8" y="${y + 13}">${tok(v)}<tspan class="fs"> · ${
+      (100 * v / inTotal).toFixed(1)}% of input</tspan></text>${k.key === 'input' ? `
+      <circle cx="12" cy="${y + 25}" r="3.5" fill="${KIND.resent.color}"/>
+      <text class="fs2" x="20" y="${y + 29}">of which ${pct(resentShare)} re-sent</text>` : ''}`;
   }).join('');
   const spent = (money && money.perKind) || {};
+  const spentOf = key => key === 'input'
+    ? (spent.fresh || 0) + (spent.resent || 0) : spent[key];
   const gid = uid + '-node';
   return `<div class="flow">
     <div class="fhead"><div><div class="cap">How your tokens flow</div>
@@ -1248,21 +1798,22 @@ function flowCard(scope) {
       <text class="fl" x="${W - 8}" y="${(cy - outW / 2 - 9).toFixed(1)}" text-anchor="end">${
         esc(KIND.output.label)}</text>
       <text class="fv" x="${W - 8}" y="${(cy + outW / 2 + 18).toFixed(1)}" text-anchor="end">${
-        tok(outV)}<tspan class="fs"> · ${(100 * outV / (grand || 1)).toFixed(2)}% of all</tspan></text>
+        tok(t.output)}<tspan class="fs"> · ${(100 * t.output / (grand || 1)).toFixed(2)}% of all</tspan></text>
     </svg>
     <div class="insights">
       <div><b>${rereadX(win.fresh ? win.cache_read / win.fresh : 0)}</b>
         <span>each fresh token re-read, on average</span></div>
-      <div><b>${pct((win.fresh + win.resent) ? win.resent / (win.fresh + win.resent) : 0)}</b>
+      <div><b>${pct(resentShare)}</b>
         <span>of full-price input was re-sent, not new</span></div>
       <div><b>${(ins.cache_misses || 0).toLocaleString()}</b>
         <span>cache misses · ${pct(ins.calls_missed_share || 0)} of calls</span></div>
     </div>
-    ${cells.length ? `<div class="rates" title="Rate: USD per million tokens. Spent: this scope's tokens at that rate, API list price.">${
+    ${cells.length ? `<div class="rates tiers" title="Rate: USD per million tokens. Spent: this scope's tokens at that rate, API list price.">${
       cells.map(({ k, price, note }) => `<div class="rc">
-        <div class="rl"><span class="sw" style="background:${k.color}"></span>${esc(k.label)}</div>
+        <div class="rl" title="${esc(k.note)}"><span class="sw" style="background:${
+          k.color}"></span>${esc(k.label)}</div>
         <b>${esc(price)}<small>/MTok</small></b><span class="rn">${esc(note)}</span>
-        ${spent[k.key] != null ? `<span class="rm">≈ ${usd(spent[k.key])} spent</span>` : ''}
+        ${spentOf(k.key) != null ? `<span class="rm">≈ ${usd(spentOf(k.key))} spent</span>` : ''}
       </div>`).join('')}</div>` : ''}
     ${money ? `<div class="spend">
       <div><b>${usd(money.spend)}</b><span>at API list price — without a plan</span></div>
@@ -1275,21 +1826,22 @@ function flowCard(scope) {
 
 /** Price per million tokens: whole dollars when whole, else cents. */
 const rate$ = v => '$' + (Math.abs(v - Math.round(v)) < 0.005 ? Math.round(v) : v.toFixed(2));
-/** The per-stream rate cells for one model's list prices. */
+/** The per-tier rate cells for one model's list prices. */
 function rateCells(rate, mult) {
-  const rIn = rate.input, rOut = rate.output;
-  const w = `${rate$(rIn * mult.write_5m)}–${rate$(rIn * mult.write_1h)}`;
+  const [input, cached, output] = TIERS;
   return [
-    { k: KIND.fresh, price: w, note: `cache write · ${mult.write_5m}–${mult.write_1h}× input` },
-    { k: KIND.resent, price: w, note: 'written again · same rate' },
-    { k: KIND.cache_read, price: rate$(rIn * mult.read), note: `${mult.read}× input rate` },
-    { k: KIND.output, price: rate$(rOut), note: 'list output rate' },
+    { k: input, price: `${rate$(rate.input * mult.write_5m)}–${rate$(rate.input * mult.write_1h)}`,
+      note: `cache write · ${mult.write_5m}–${mult.write_1h}× the $${rate.input} input rate` },
+    { k: cached, price: rate$(rate.input * mult.read), note: `cache read · ${mult.read}× input rate` },
+    { k: output, price: rate$(rate.output), note: 'list output rate' },
   ];
 }
-/** Effective per-stream rates when several models are blended: spend ÷ tokens. */
+/** Effective per-tier rates when several models are blended: spend ÷ tokens. */
 function blendedCells(money, win) {
-  return KINDS.map(k => ({
-    k, price: rate$(win[k.key] ? money.perKind[k.key] / win[k.key] * 1e6 : 0),
+  const t = tierOf(win), pk = money.perKind;
+  const spent = { input: pk.fresh + pk.resent, cache_read: pk.cache_read, output: pk.output };
+  return TIERS.map(k => ({
+    k, price: rate$(t[k.key] ? spent[k.key] / t[k.key] * 1e6 : 0),
     note: 'effective, blended',
   }));
 }
@@ -3019,6 +3571,43 @@ views.tools = async (params) => {
   wireToolRows($('#view'), null, project);
 };
 
+views.agents = async (params, sid, aid) => {
+  const live = await api('/api/live', {}, { fresh: true });
+  state.live = live;
+  const ws = normalizeWorkspaces(live);
+  const sel = agentsPick(ws, sid, aid);
+  // Pin the auto-pick in the URL so the 3s poll doesn't jump to a
+  // newly-started agent, and so the selection is shareable.
+  if (sel.auto && sel.kind === 'agent' && !sid) {
+    history.replaceState(null, '', `#/agents/${sel.session.id}/${sel.agent.id}`);
+    sid = sel.session.id;
+    aid = sel.agent.id;
+  }
+  if (sel.kind === 'agent') {
+    try {
+      const d = await api(`/api/agents/${sel.session.id}/${sel.agent.id}`, {}, { fresh: true });
+      Object.assign(sel.agent, d);
+      if (d.activity) sel.agent.activity = d.activity;
+      if (d.recent) sel.agent.recent = d.recent;
+      agentsEnrich = { key: `${sel.session.id}|${sel.agent.id}`, data: sel.agent };
+    } catch (e) { /* live row is enough */ }
+  } else {
+    agentsEnrich = { key: '', data: null };
+  }
+  if ($('#agfloor')) {
+    paintAgentsFloor(live, sid, aid);
+    return;
+  }
+  $('#view').innerHTML = `
+    <div class="hd">
+      <div><h1>Agents</h1>
+        <p class="sub">${esc(agentsSubline(live))}</p></div>
+    </div>
+    <div class="agfloor" id="agfloor">${agentsFloorHTML(ws, sid, aid)}</div>`;
+  agentFlowMount(sel);
+  hydrateTips($('#view'));
+};
+
 // ── router (instant paint, cancellation, stale-response guard) ────────
 let navToken = 0;
 let navAbort = null;
@@ -3058,6 +3647,10 @@ async function route(silent) {
 
   const fn = views[name];
   if (!fn) { location.hash = '#/overview'; return; }
+
+  // Selecting another agent on the floor is a data swap, not a navigation —
+  // skip the skeleton so the tree doesn't flash.
+  if (!silent && name === 'agents' && $('#agfloor')) silent = true;
 
   if (!silent) progStart();
   const skelTimer = silent ? null : paintShell(name);
@@ -3157,6 +3750,23 @@ async function poll() {
     const badge = $('#liveBadge');
     badge.hidden = n === 0;
     badge.textContent = n;
+    const ab = $('#agentBadge');
+    if (ab) {
+      const na = d.running_agents.length;
+      ab.hidden = na === 0;
+      ab.textContent = na;
+    }
+    // Agents floor: patch in place so the 3s poll, not the 12s page
+    // refresh, is what advances the live trace.
+    if ($('#agfloor')) {
+      const floor = $('#agfloor');
+      const sel = getSelection();
+      if (!(sel && String(sel) && floor.contains(sel.anchorNode))) {
+        const raw = (location.hash.slice(1) || '/agents').split('?')[0];
+        const seg = raw.split('/').filter(Boolean);
+        paintAgentsFloor(d, seg[1] || '', seg[2] || '');
+      }
+    }
     if (!state.plan) fetchPlan();
   } catch (e) { /* server restarting; retry next tick */ }
 }
@@ -3246,7 +3856,7 @@ setInterval(() => {
 setInterval(fetchPlan, 180000);
 // Silent refresh for the pages that show live state — otherwise the running
 // counts and status pills are a snapshot of whenever you navigated in.
-const LIVE_PAGES = new Set(['overview', 'sessions', 'session',
+const LIVE_PAGES = new Set(['overview', 'sessions', 'session', 'agents',
   'workflows', 'workflow', 'git']);
 setInterval(() => {
   const page = (location.hash.slice(1) || '/overview')

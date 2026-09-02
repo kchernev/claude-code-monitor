@@ -10,7 +10,8 @@ import pytest
 from claude_monitor.models import ModelStat, Session
 from claude_monitor.web import server as srv
 from claude_monitor.web.server import (
-    _hostname_of, _limit_entry, _plan_label, host_is_trusted, plan_payload,
+    _hostname_of, _limit_entry, _plan_label, _time_buckets,
+    host_is_trusted, plan_payload,
 )
 
 from conftest import tool_use
@@ -153,6 +154,12 @@ def test_the_index_page_renders(client):
     assert resp.status_code == 200
     assert resp.headers["Content-Type"] == "text/html; charset=utf-8"
     assert resp.headers["Cache-Control"] == "no-store"
+
+
+def test_the_index_page_has_an_agents_tab(client):
+    body = client.get("/").get_data(as_text=True)
+    assert 'href="#/agents"' in body
+    assert 'id="agentBadge"' in body
 
 
 def test_the_asset_version_placeholder_is_substituted(client):
@@ -349,7 +356,26 @@ def test_a_malformed_workflow_id_never_reaches_the_filesystem(client, wfid):
 def test_a_single_agent_can_be_fetched(client):
     resp = client.get("/api/agents/aaaaaaaa/agent1")
     assert resp.status_code == 200
-    assert resp.get_json()["id"] == "agent1"
+    d = resp.get_json()
+    assert d["id"] == "agent1"
+    assert "timeline" in d
+    assert d["timeline"][0]["out"] == 10
+    assert d["bucket_s"] == 60
+
+
+def test_time_buckets_sum_calls_in_the_same_five_minutes():
+    # (t, out, ctx, cost, uncached, stub, cache_read, cache_write, resent)
+    rows = _time_buckets([
+        (1000, 10, 0, 0.0, 0.0, 5, 0, 0, 0),
+        (1100, 15, 0, 0.0, 0.0, 5, 0, 0, 0),
+        (1600, 7, 0, 0.0, 0.0, 5, 0, 0, 0),
+    ], bucket_s=300)
+    assert [r["t"] for r in rows] == [900, 1200, 1500]
+    assert [r["out"] for r in rows] == [25, 0, 7]
+    assert [r["fresh"] for r in rows] == [10, 0, 5]
+    assert (rows[0]["o"], rows[0]["h"], rows[0]["l"], rows[0]["c"]) == (10, 15, 10, 15)
+    assert rows[1]["n"] == 0
+    assert (rows[2]["o"], rows[2]["c"]) == (7, 7)
 
 
 def test_an_unknown_agent_is_a_404(client):
@@ -376,7 +402,52 @@ def test_the_live_endpoint_reports_an_idle_machine_calmly(client):
     d = client.get("/api/live").get_json()
     assert d["live"] == []
     assert d["running_agents"] == []
+    assert d["workspaces"] == []
     assert d["burn_rate_hourly"] == 0.0
+
+
+def test_live_workspaces_nest_running_agents_under_the_cwd(corpus_dir):
+    # BASE_TS is an hour ago, which is past the agent's 5-minute liveness
+    # window — stamp the in-flight records near now so they count as running.
+    from conftest import BASE_TS
+    recent = (datetime.now(timezone.utc) - BASE_TS).total_seconds() - 8
+
+    a = corpus_dir.session(project="monitor", cwd="/home/dev/monitor",
+                           session_id="aaaaaaaa-1111-2222-3333-444444444444")
+    a.title("Rebuild the parse cache")
+    a.assistant(at=recent - 4,
+                tools=[tool_use("Bash", {"command": "pytest"}, "tu_1")])
+    ag = a.agent("agent1", meta={"agentType": "Explore",
+                                 "description": "Map the parser"})
+    ag.assistant(at=recent,
+                 tools=[tool_use("Read", {"file_path": "/x.py"}, "tu_a")])
+    a.build()
+
+    app = srv.create_app(claude_dir=corpus_dir.root, allow_network=False)
+    store = app.config["STORE"]
+    sessions = store.corpus.load()
+    sessions[0].pid = 4242
+    store._publish(sessions)
+    c = app.test_client()
+
+    d = c.get("/api/live").get_json()
+    assert len(d["workspaces"]) == 1
+    ws = d["workspaces"][0]
+    assert ws["project"] == "monitor"
+    assert ws["cwd"] == "/home/dev/monitor"
+    assert ws["agents_running"] == 1
+    assert [w["project"] for w in d["workspaces"]] == ["monitor"]
+    lead = ws["sessions"][0]
+    assert lead["id"].startswith("aaaaaaaa")
+    assert lead["live"] is True
+    assert len(lead["running"]) == 1
+    run = lead["running"][0]
+    assert run["id"] == "agent1"
+    assert run["topic"] == "Map the parser"
+    assert run["activity"]["state"] == "tool"
+    assert run["activity"]["detail"] == "/x.py"
+    assert run["recent"] == []
+    assert d["running_agents"][0]["id"] == "agent1"
 
 
 def test_reindexing_rebuilds_the_snapshot(client):

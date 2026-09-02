@@ -458,8 +458,10 @@ def session_brief(s: Session) -> dict:
     }
 
 
-def agent_json(a: AgentRun, *, parent_live: bool = False, project: str = "") -> dict:
-    return {
+def agent_json(a: AgentRun, *, parent_live: bool = False, project: str = "",
+               live_extra: bool = False) -> dict:
+    state = a.state(parent_live=parent_live)
+    d = {
         "id": a.agent_id,
         "session_id": a.session_id,
         "project": project,
@@ -483,9 +485,77 @@ def agent_json(a: AgentRun, *, parent_live: bool = False, project: str = "") -> 
         "output_tps": a.output_tps,
         "tools": a.tool_counts,
         "tool_errors": a.tool_errors,
-        "state": a.state(parent_live=parent_live),
+        "state": state,
         "completed": a.completed,
+        "activity": a.activity(parent_live=parent_live),
     }
+    # The live trace is only useful while the agent is working (or on the
+    # detail page, which opts in). Shipping it on every historical row
+    # would bloat the agents list for no gain.
+    if live_extra or state == "running":
+        d["recent"] = a.recent
+        until = time.time() if state == "running" else None
+        d["timeline"] = _time_buckets(a.timeline, bucket_s=60, until=until)
+        d["bucket_s"] = 60
+    return d
+
+
+def workspaces_json(sessions: List[Session]) -> List[dict]:
+    """Live sessions grouped by working directory, with running agents nested.
+
+    The Agents floor is a process tree: one workspace per cwd, each live
+    session as a lead, each running subagent as a child. Order is recency
+    of last write so the busiest work sits at the top.
+    """
+    live = [s for s in sessions if s.is_live]
+    live.sort(
+        key=lambda s: s.ended or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    groups: Dict[str, List[Session]] = {}
+    order: List[str] = []
+    for s in live:
+        key = s.cwd or s.project or s.session_id
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(s)
+
+    out: List[dict] = []
+    for key in order:
+        group = groups[key]
+        lead = group[0]
+        sess_rows = []
+        n_agents = 0
+        for s in group:
+            running = []
+            for a in s.agents:
+                if a.state(parent_live=True) != "running":
+                    continue
+                d = agent_json(a, parent_live=True, project=s.project,
+                               live_extra=True)
+                d["session_title"] = s.title
+                d["session_short"] = s.session_id[:8]
+                running.append(d)
+            n_agents += len(running)
+            brief = session_brief(s)
+            # session_brief.agents is the lifetime count; the floor wants
+            # the running ones nested here instead.
+            brief["running"] = running
+            sess_rows.append(brief)
+        out.append({
+            "project": lead.project,
+            "cwd": lead.cwd,
+            "sessions": sess_rows,
+            "agents_running": n_agents,
+        })
+    # Busy workspaces first so a live session with no subagents doesn't
+    # bury the ones that have agents running. ISO timestamps sort
+    # lexicographically, so reverse=True also keeps the most recently
+    # written workspace first inside each count.
+    out.sort(key=lambda w: (w["agents_running"],
+                            w["sessions"][0].get("ended") or ""), reverse=True)
+    return out
 
 
 def cost_by_type(model: str, u) -> dict:
@@ -703,7 +773,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
         burn, _ = analytics.recent_rates(live, 900.0)
         _, tps_now = analytics.recent_rates(live, 120.0)
         running_agents = [
-            agent_json(a, parent_live=True, project=s.project)
+            agent_json(a, parent_live=True, project=s.project, live_extra=True)
             for s in live for a in s.agents
             if a.state(parent_live=True) == "running"
         ]
@@ -714,6 +784,7 @@ def create_app(claude_dir: Optional[Path] = None, *,
         return jsonify({
             "now": datetime.now(timezone.utc).isoformat(),
             "live": [session_brief(s) for s in live],
+            "workspaces": workspaces_json(sessions),
             "running_agents": running_agents,
             "burn_rate_hourly": burn,
             "tps_now": tps_now,
@@ -913,7 +984,8 @@ def create_app(claude_dir: Optional[Path] = None, *,
             return jsonify({"error": "session not found"}), 404
         for a in s.agents:
             if a.agent_id == aid:
-                d = agent_json(a, parent_live=s.is_live, project=s.project)
+                d = agent_json(a, parent_live=s.is_live, project=s.project,
+                               live_extra=True)
                 d["prompt"] = a.prompt
                 # The meta.json label is right in the large majority of cases
                 # but is occasionally stale on a resumed agent, so ship the
@@ -1419,6 +1491,63 @@ def _hourly_buckets(s: Session) -> List[dict]:
     for b in buckets:
         b["cost"] = round(b["cost"], 6)
     return buckets
+
+
+def _time_buckets(timeline: List[tuple], bucket_s: float = 300.0,
+                  until: Optional[float] = None,
+                  max_buckets: int = 288) -> List[dict]:
+    """Sum token kinds into fixed wall-clock windows (default 5 minutes).
+
+    Empty windows between the first and last activity stay as zeros so the
+    chart's x-axis is real time, not call index. ``until`` extends the last
+    window — a running agent should include the current 5 minutes.
+    """
+    if not timeline:
+        return []
+    step = int(bucket_s)
+    keyed: Dict[int, dict] = {}
+    for p in timeline:
+        k = int(p[0] // step) * step
+        fresh, resent, cread = timeline_split(p)
+        b = keyed.get(k)
+        if b is None:
+            b = {"t": k, "out": 0, "fresh": 0, "resent": 0, "cache_read": 0,
+                 "cost": 0.0, "ctx": 0, "n": 0,
+                 "o": None, "h": 0, "l": None, "c": 0}
+            keyed[k] = b
+        out_v = p[1]
+        b["out"] += out_v
+        b["fresh"] += fresh
+        b["resent"] += resent
+        b["cache_read"] += cread
+        b["cost"] += p[3]
+        if p[2] > b["ctx"]:
+            b["ctx"] = p[2]
+        if b["n"] == 0:
+            b["o"] = b["h"] = b["l"] = out_v
+        else:
+            if out_v > b["h"]:
+                b["h"] = out_v
+            if out_v < b["l"]:
+                b["l"] = out_v
+        b["c"] = out_v
+        b["n"] += 1
+    t0 = min(keyed)
+    t1 = max(keyed)
+    if until is not None:
+        t1 = max(t1, int(until // step) * step)
+    span = int((t1 - t0) / step) + 1
+    if span > max_buckets:
+        t0 = t1 - (max_buckets - 1) * step
+    out: List[dict] = []
+    t = t0
+    while t <= t1:
+        out.append(keyed.get(t) or {
+            "t": t, "out": 0, "fresh": 0, "resent": 0, "cache_read": 0,
+            "cost": 0.0, "ctx": 0, "n": 0, "o": None, "h": 0, "l": None, "c": 0,
+        })
+        t += step
+    return out
 
 
 def _downsample(timeline: List[tuple], target: int) -> List[dict]:

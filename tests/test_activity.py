@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from claude_monitor.models import Session
+from claude_monitor.models import AgentRun, Session
 
 
 def make_live(*, tail=None, pending=(), ended_ago=5.0, **kw) -> Session:
@@ -220,3 +220,47 @@ def test_the_prompt_falls_back_to_the_last_browsable_one():
                   prompts=[{"ts": "x", "text": "first"},
                            {"ts": "y", "text": "most recent"}])
     assert s.activity()["prompt"] == "most recent"
+
+
+# ---------------------------------------------------------------------------
+# Agents
+# ---------------------------------------------------------------------------
+
+
+def make_running_agent(*, tail=None, pending=(), ended_ago=5.0, **kw) -> AgentRun:
+    a = AgentRun(agent_id="a1", session_id="s1", description="Map the parser",
+                 ended=datetime.now(timezone.utc) - timedelta(seconds=ended_ago),
+                 **kw)
+    a.tail = tail or {}
+    a.pending_tools = list(pending)
+    return a
+
+
+def test_a_stopped_agent_reports_no_activity():
+    a = AgentRun(agent_id="a1", session_id="s1")
+    assert a.activity(parent_live=True) is None
+    assert a.activity(parent_live=False) is None
+
+
+def test_a_running_agent_with_an_open_tool_reports_it():
+    a = make_running_agent(
+        tail={"kind": "assistant", "stop": None, "ts": time.time() - 4},
+        pending=[tool("Bash", ago=4, text="pytest -q", sub="run tests")])
+    act = a.activity(parent_live=True)
+    assert act is not None
+    assert act["state"] == "tool"
+    assert act["label"] == "running Bash"
+    assert act["detail"] == "pytest -q"
+    assert act["prompt"] == "Map the parser"
+
+
+def test_an_agent_waiting_copy_does_not_ask_the_user():
+    # Subagents wait on the parent, not on a human at the keyboard.
+    a = make_running_agent(tail={"kind": "assistant", "stop": "end_turn",
+                                 "ts": time.time() - 2})
+    # end_turn marks the agent completed in the parser; here we simulate a
+    # running agent whose tail happens to look like a finished turn.
+    act = a.activity(parent_live=True)
+    assert act["state"] == "waiting"
+    assert "parent" in act["label"]
+    assert "your input" not in act["label"]
